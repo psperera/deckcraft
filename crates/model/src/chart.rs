@@ -361,6 +361,40 @@ impl AxisCrosses {
     }
 }
 
+/// The plot area's manual layout: `c:plotArea/c:layout/c:manualLayout` with `c:layoutTarget`
+/// `inner` and `c:xMode`/`c:yMode` `edge`. `x` and `y` are the inner plot rectangle's left and top
+/// edges and `w` and `h` its width and height, all as fractions of the chart frame. The inner
+/// rectangle holds the bars, lines and gridlines; the tick labels sit outside it.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PlotLayout {
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+}
+
+impl PlotLayout {
+    /// The layout kept within the chart frame: `None` when a value isn't finite or the rectangle
+    /// has no area inside the frame, so the chart falls back to its automatic layout.
+    pub fn sanitized(self) -> Option<Self> {
+        // One axis' start and length, cut to the frame. Values already inside it stay as they
+        // are, so a saved file keeps its numbers.
+        let span = |a: f64, len: f64| {
+            if !(a.is_finite() && len.is_finite()) {
+                return None;
+            }
+            // Constant, ordered bounds: `clamp` cannot panic here.
+            let (a0, a1) = (a.clamp(0.0, 1.0), (a + len).clamp(0.0, 1.0));
+            if a1 - a0 <= 1e-6 {
+                return None;
+            }
+            Some(if a0 == a && a1 == a + len { (a, len) } else { (a0, a1 - a0) })
+        };
+        let ((x, w), (y, h)) = (span(self.x, self.w)?, span(self.y, self.h)?);
+        Some(PlotLayout { x, y, w, h })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Chart {
@@ -392,6 +426,10 @@ pub struct Chart {
     pub palette: String,
     pub plot_fill: Option<Fill>,
     pub chart_fill: Option<Fill>,
+    /// Where the plot area's inner rectangle goes, when the file fixes it
+    /// (`c:plotArea/c:layout/c:manualLayout`); `None`: laid out automatically.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plot_layout: Option<PlotLayout>,
     pub text_color: Option<ColorRef>,
     pub hole_size: f64,
     pub gap_width: f64,
@@ -545,6 +583,7 @@ impl Default for Chart {
             palette: "colorful1".into(),
             plot_fill: None,
             chart_fill: None,
+            plot_layout: None,
             text_color: None,
             hole_size: 0.5,
             gap_width: 2.19,
@@ -800,6 +839,7 @@ impl Chart {
     /// A logarithmic value axis' scale in exponents — (min, max, unit), so its labels are
     /// `base^min`, `base^(min+unit)`… — covering the positive values: whole powers, as PowerPoint
     /// and LibreOffice draw them. `None` when the axis isn't logarithmic or nothing is positive.
+    /// A fixed minimum or maximum (`c:min`, `c:max`) is the axis' end exactly.
     pub fn log_axis_scale(&self, max_intervals: usize) -> Option<(f64, f64, f64)> {
         let b = self.y_log_base.filter(|b| b.is_finite() && *b >= 2.0)?;
         let vals = self.series.iter().filter(|s| !self.on_secondary(s)).flat_map(|s| s.values.iter().flatten().copied());
@@ -808,9 +848,10 @@ impl Chart {
             .fold(None, |r: Option<(f64, f64)>, v| Some(r.map_or((v, v), |(a, z)| (a.min(v), z.max(v)))))?;
         let e = |v: f64| v.log(b);
         let lo = self.y_min.filter(|v| *v > 0.0).map_or(e(lo).floor(), e);
-        let hi = self.y_max.filter(|v| *v > 0.0).map_or(e(hi).ceil(), e).max(lo + 1.0);
+        let fixed_hi = self.y_max.filter(|v| *v > 0.0).map(e).filter(|h| *h > lo);
+        let hi = fixed_hi.unwrap_or_else(|| e(hi).ceil().max(lo + 1.0));
         let unit = ((hi - lo) / max_intervals.max(1) as f64).ceil().max(1.0);
-        Some((lo, lo + ((hi - lo) / unit).ceil() * unit, unit))
+        Some((lo, fixed_hi.unwrap_or(lo + ((hi - lo) / unit).ceil() * unit), unit))
     }
 
     /// A value axis label in the axis' number format and the chart's language.
@@ -989,7 +1030,12 @@ pub fn axis_scale(
     let n = max_intervals.clamp(1, 50) as f64;
     let step = axis_step(fin(major), lo, hi, n, unit);
     let min = fmin.unwrap_or((lo / step + 1e-9).floor() * step);
-    let max = fmax.unwrap_or((hi / step - 1e-9).ceil() * step).max(min + step);
+    let max = match fmax {
+        // A fixed maximum is the axis' end exactly, even when it falls short of the next tick
+        // (PowerPoint doesn't round it out to one).
+        Some(m) if m > min => m,
+        m => m.unwrap_or((hi / step - 1e-9).ceil() * step).max(min + step),
+    };
     (min, max, step)
 }
 
@@ -1115,6 +1161,32 @@ mod tests {
             let (a, b, s) = axis_scale(lo, hi, None, None, Some(0.0), 0, true);
             assert!(a.is_finite() && b.is_finite() && s > 0.0 && b > a, "{lo} {hi}: {a} {b} {s}");
         }
+    }
+
+    /// U30: `c:min`/`c:max` are the axis' ends exactly, not rounded out to a tick.
+    #[test]
+    fn fixed_axis_ends_are_kept_exactly() {
+        // Zero to the tallest column, as a decorated chart fixes it.
+        assert_eq!(axis_scale(0.0, 288.0, Some(0.0), Some(288.0), None, 12, true).1, 288.0);
+        // A maximum short of the first tick past the minimum stays put (it used to become 50).
+        assert_eq!(axis_scale(0.0, 40.0, Some(0.0), Some(45.0), Some(50.0), 12, true), (0.0, 45.0, 50.0));
+        assert_eq!(axis_scale(0.0, 3.0, None, Some(3.7), Some(5.0), 12, true), (0.0, 3.7, 5.0));
+        assert_eq!(axis_scale(-12.0, 3.0, Some(-12.5), Some(3.0), Some(20.0), 12, true), (-12.5, 3.0, 20.0));
+        // A logarithmic axis keeps a fixed maximum between whole powers too: 500, not 1 000.
+        let mut c = column(&[2.0, 300.0]);
+        c.y_log_base = Some(10.0);
+        c.y_max = Some(500.0);
+        let (lo, hi, unit) = c.log_axis_scale(8).unwrap();
+        assert!(lo == 0.0 && (hi - 500f64.log10()).abs() < 1e-12 && unit == 1.0, "{lo} {hi} {unit}");
+        // Within one decade, 2 to 5 (it used to widen to 2 to 20).
+        c.y_min = Some(2.0);
+        c.y_max = Some(5.0);
+        let (lo, hi, _) = c.log_axis_scale(8).unwrap();
+        assert!((lo - 2f64.log10()).abs() < 1e-12 && (hi - 5f64.log10()).abs() < 1e-12, "{lo} {hi}");
+        // A maximum at or below the minimum is no axis: the automatic end stands in.
+        c.y_max = Some(1.0);
+        let hi = c.log_axis_scale(8).unwrap().1;
+        assert!((hi - (2f64.log10() + 3.0)).abs() < 1e-12, "{hi}");
     }
 
     fn column(values: &[f64]) -> Chart {

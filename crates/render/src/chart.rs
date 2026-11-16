@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use deckcraft_color::{ColorTransform, Rgba, SchemeSlot};
 use deckcraft_model::Shape;
-use deckcraft_model::chart::{AxisCrosses, Chart, ChartType, TrendlineType, axis_scale};
+use deckcraft_model::chart::{AxisCrosses, Chart, ChartType, PlotLayout, TrendlineType, axis_scale};
 use deckcraft_model::resolve::Ctx;
 use deckcraft_model::style::{ColorRef, Fill};
 use deckcraft_model::text::{Align, Anchor, Bullet, TextBody};
@@ -293,9 +293,10 @@ fn plot_rect(area: Rect, horiz: bool, far: bool, (gutter, gutter_r): (f64, f64),
     }
 }
 
-/// The tick values of an axis (min, max, major step), one per step (at most 51).
+/// The tick values of an axis (min, max, major step), one per step from the minimum (at most 51).
+/// None lies past the maximum: a fixed maximum between two steps gets no tick of its own.
 fn axis_ticks((lo, hi, st): (f64, f64, f64)) -> impl Iterator<Item = f64> {
-    let n = if st > 0.0 { (((hi - lo) / st).round() as i64).clamp(1, 50) } else { 1 };
+    let n = if st > 0.0 { ((hi - lo) / st + 1e-6).floor().clamp(0.0, 50.0) as i64 } else { 1 };
     (0..=n).map(move |k| lo + k as f64 * st)
 }
 
@@ -404,8 +405,16 @@ fn draw_inner(ctx: &mut RenderContext, rctx: &Ctx, c: &Chart, frame: ChartFrame<
     let bar_kind = c.series.iter().map(|s| c.series_kind(s)).find(|k| k.is_bar_like());
     let horiz = if combo { bar_kind.is_some_and(ChartType::horizontal) } else { c.kind.horizontal() };
     area = draw_axis_titles(ctx, rctx, &AxisTitleDrawing { chart: c, transform: m, base, text_color: text_col, horiz }, area);
+    // A plot the file fixes (`c:manualLayout`, inner) goes exactly there, at its fractions of the
+    // chart frame, whatever the title, legend and labels take.
+    let manual = c.plot_layout.and_then(PlotLayout::sanitized).map(|l| Rect::new(l.x * w, l.y * h, (l.x + l.w) * w, (l.y + l.h) * h));
     // As many major units as the value axis has room for labels (PowerPoint's automatic unit).
-    let axis_len = if horiz { area.width() - base * 4.5 } else { area.height() - base * 1.8 };
+    let axis_len = match manual {
+        Some(p) if horiz => p.width(),
+        Some(p) => p.height(),
+        None if horiz => area.width() - base * 4.5,
+        None => area.height() - base * 1.8,
+    };
     let max_intervals = (axis_len / if horiz { base * 6.0 } else { base * 1.9 }).floor().clamp(2.0, 12.0) as usize;
     // A logarithmic axis is scaled in exponents of its base.
     let log = c.log_axis_scale(max_intervals).map(|sc| (c.y_log_base.unwrap_or(10.0), sc));
@@ -435,7 +444,9 @@ fn draw_inner(ctx: &mut RenderContext, rctx: &Ctx, c: &Chart, frame: ChartFrame<
     };
     let gutter_r = second.filter(|_| !c.y2_hidden).map(|sc| clamp_soft(label_w(true, sc), base * 1.5, area.width() * 0.3)).unwrap_or(0.0);
     let (origin, cat_far) = primary_crossing(c, log.map(|(b, _)| b), (min, max), &to_e);
-    let plot = plot_rect(area, horiz, cat_far, (gutter, gutter_r), base);
+    let plot = manual.unwrap_or_else(|| plot_rect(area, horiz, cat_far, (gutter, gutter_r), base));
+    // Around a fixed plot the tick labels may use the whole frame.
+    let area = if manual.is_some() { Rect::new(0.0, 0.0, w, h).union(plot) } else { area };
     if let Some(f) = &c.plot_fill {
         crate::paint::fill_path(ctx, rctx, f, None, &plot.to_path(0.1), plot, m, deckcraft_geom::preset::FillMode::Norm, 1.0, rctx.pres);
     }
@@ -742,7 +753,7 @@ fn draw_gridlines(ctx: &mut RenderContext, draw: &GridlineDrawing<'_, '_>) {
     // Minor gridlines, under the major ones: five to a major unit.
     if c.minor_gridlines {
         let minor = step / 5.0;
-        let n = if minor > 0.0 { (((max - min) / minor).round() as i64).clamp(1, 500) } else { 1 };
+        let n = if minor > 0.0 { ((max - min) / minor + 1e-6).floor().clamp(1.0, 500.0) as i64 } else { 1 };
         let mut g = BezPath::new();
         for k in (0..=n).filter(|k| k % 5 != 0) {
             // On a logarithmic axis `min`, `max` and `step` are exponents of the base.

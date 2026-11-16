@@ -1,7 +1,7 @@
 //! Chart parts: a `c:chartSpace` with cached categories and values.
 //! An unchanged chart also keeps the embedded workbook and the other parts it points at.
 
-use deckcraft_model::chart::{AxisCrosses, Chart, ChartType, ErrorBars, Series, Trendline, TrendlineType};
+use deckcraft_model::chart::{AxisCrosses, Chart, ChartType, ErrorBars, PlotLayout, Series, Trendline, TrendlineType};
 use deckcraft_model::style::Fill;
 
 use crate::opc::{NS_A, NS_C, NS_R};
@@ -9,6 +9,24 @@ use crate::opc::{NS_A, NS_C, NS_R};
 /// The Office 2016 chart namespace.
 pub const NS_CX: &str = "http://schemas.microsoft.com/office/drawing/2014/chartex";
 use crate::xml::{A, W};
+
+/// The plot area's `c:layout`: a manual inner layout placed by its edges, when the chart has one.
+fn plot_layout(w: &mut W, c: &Chart) {
+    let Some(l) = c.plot_layout.and_then(PlotLayout::sanitized) else {
+        w.empty0("c:layout");
+        return;
+    };
+    w.open0("c:layout");
+    w.open0("c:manualLayout");
+    w.val("c:layoutTarget", "inner");
+    w.val("c:xMode", "edge");
+    w.val("c:yMode", "edge");
+    for (k, v) in [("c:x", l.x), ("c:y", l.y), ("c:w", l.w), ("c:h", l.h)] {
+        w.val(k, fmt_num(v));
+    }
+    w.close("c:manualLayout");
+    w.close("c:layout");
+}
 
 /// Column letter for a 0-based index (A, B, … Z, AA…).
 fn col(i: usize) -> String {
@@ -747,7 +765,7 @@ pub fn chart_xml(c: &Chart) -> (Vec<u8>, bool) {
         None => w.val("c:autoTitleDeleted", 1),
     }
     w.open0("c:plotArea");
-    w.empty0("c:layout");
+    plot_layout(&mut w, c);
     let indexed: Vec<(usize, &Series)> = c.series.iter().enumerate().collect();
     let main = match c.kind {
         ChartType::Combo => c.series.first().and_then(|s| s.kind).unwrap_or(ChartType::Column),
@@ -1328,6 +1346,22 @@ mod tests {
             }
             c.y_reversed = false;
             assert!(!crate::read::chart::read_chart_xml(&super::chart_xml(&c).0).unwrap().y_reversed);
+        }
+    }
+
+    #[test]
+    fn a_manual_plot_layout_round_trips() {
+        use deckcraft_model::chart::PlotLayout;
+        for kind in [ChartType::Column, ChartType::Bar, ChartType::Line, ChartType::Combo] {
+            let mut c = Chart::sample(kind);
+            c.plot_layout = Some(PlotLayout { x: 0.0625, y: 0.21875, w: 0.8125, h: 0.59375 });
+            let xml = super::chart_xml(&c).0;
+            assert!(String::from_utf8_lossy(&xml).contains(r#"<c:layoutTarget val="inner"/><c:xMode val="edge"/><c:yMode val="edge"/>"#));
+            assert_eq!(crate::read::chart::read_chart_xml(&xml).unwrap().plot_layout, c.plot_layout, "{kind:?}");
+            c.plot_layout = None;
+            let xml = super::chart_xml(&c).0;
+            assert!(String::from_utf8_lossy(&xml).contains("<c:plotArea><c:layout/>"), "{kind:?}");
+            assert_eq!(crate::read::chart::read_chart_xml(&xml).unwrap().plot_layout, None);
         }
     }
 }

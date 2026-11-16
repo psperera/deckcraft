@@ -180,6 +180,8 @@ Detail in [file-format-parity.md](file-format-parity.md).
   (`corpus_charts.rs`) and are drawn: linear, exponential, logarithmic, polynomial, power and
   moving average, with forecast and the equation and R² label. A moving average is drawn with
   neither label. Reversed value axes and category-axis crossings are read and drawn.
+  A manual inner plot layout places the plot and survives rebuilds; outer and `factor`
+  layouts, and the legend's and title's own manual layouts, are still laid out automatically.
   The primary axis survives chart rebuilds. A combo chart's secondary value axis is read
   (`y2_*`, `Series.secondary_axis`) but is not written back when the chart is rebuilt.
   An unchanged chart's embedded workbook now survives save (#335); editing the chart still

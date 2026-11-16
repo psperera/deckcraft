@@ -1,6 +1,6 @@
 //! Chart parts (`c:chartSpace`) → [`Chart`]. The original XML is kept in `Chart.raw`.
 
-use deckcraft_model::chart::{AxisCrosses, Chart, ChartType, ErrorBars, Series, Trendline, TrendlineType};
+use deckcraft_model::chart::{AxisCrosses, Chart, ChartType, ErrorBars, PlotLayout, Series, Trendline, TrendlineType};
 use deckcraft_model::style::Fill;
 
 use crate::xml::El;
@@ -212,6 +212,7 @@ fn chart_within(root: &El, mut budget: usize) -> Option<Chart> {
         .collect();
     c.chart_fill = simple_fill(root.child("spPr"));
     c.plot_fill = simple_fill(pa.child("spPr"));
+    c.plot_layout = pa.child("layout").and_then(|l| l.child("manualLayout")).and_then(plot_layout);
 
     let mut kinds: Vec<ChartType> = vec![];
     // The value axis the first plot group uses is the primary one; a group on another value axis
@@ -491,6 +492,22 @@ fn read_axes<'a>(c: &mut Chart, pa: &'a El, primary_val: &Option<String>) -> (Op
         c.axis_titles.0 = a.child("title").map(|t| rich_text(t).unwrap_or_else(|| "Axis Title".into()));
     }
     (val_ax, cat_ax)
+}
+
+/// The plot area's `c:manualLayout` when it fixes the inner plot rectangle by its edges
+/// (`c:layoutTarget inner`, `c:xMode`/`c:yMode` `edge`), as fractions of the chart frame.
+/// `c:wMode`/`c:hMode` `edge` give the right and bottom edges instead of the size.
+/// Other layouts (the schema's defaults: an `outer` target, which includes the tick labels, and
+/// `factor` offsets from the automatic position) are left to the automatic layout.
+fn plot_layout(ml: &El) -> Option<PlotLayout> {
+    if ml.child_val("layoutTarget") != Some("inner") || ml.child_val("xMode") != Some("edge") || ml.child_val("yMode") != Some("edge") {
+        return None;
+    }
+    let num = |k: &str| ml.child_val(k).and_then(|v| v.trim().parse::<f64>().ok()).filter(|v| v.is_finite());
+    let (x, y) = (num("x")?, num("y")?);
+    let w = if ml.child_val("wMode") == Some("edge") { num("w")? - x } else { num("w")? };
+    let h = if ml.child_val("hMode") == Some("edge") { num("h")? - y } else { num("h")? };
+    PlotLayout { x, y, w, h }.sanitized()
 }
 
 /// `c:scaling/c:orientation val="maxMin"`: the axis runs from its maximum to its minimum.
@@ -993,6 +1010,46 @@ mod tests {
         );
         let c = read_chart_xml(swapped.as_bytes()).unwrap();
         assert!(c.y_reversed && !c.y2_reversed);
+    }
+
+    /// A column chart whose plot area carries `manual` as its `c:manualLayout` children.
+    fn laid_out(manual: &str) -> Option<PlotLayout> {
+        let xml = format!(
+            r#"<c:chartSpace xmlns:c="{NS_C}"><c:chart><c:plotArea><c:layout><c:manualLayout>{manual}</c:manualLayout></c:layout><c:barChart><c:barDir val="col"/><c:ser><c:idx val="0"/><c:val><c:numLit><c:ptCount val="1"/><c:pt idx="0"><c:v>3</c:v></c:pt></c:numLit></c:val></c:ser><c:axId val="1"/><c:axId val="2"/></c:barChart><c:catAx><c:axId val="1"/><c:crossAx val="2"/></c:catAx><c:valAx><c:axId val="2"/><c:crossAx val="1"/></c:valAx></c:plotArea></c:chart></c:chartSpace>"#
+        );
+        read_chart_xml(xml.as_bytes()).unwrap().plot_layout
+    }
+
+    #[test]
+    fn a_manual_inner_plot_layout_is_read() {
+        let edges = r#"<c:layoutTarget val="inner"/><c:xMode val="edge"/><c:yMode val="edge"/>"#;
+        let at = |x: f64, y: f64, w: f64, h: f64| Some(PlotLayout { x, y, w, h });
+        assert_eq!(laid_out(&format!(r#"{edges}<c:x val="0.1"/><c:y val="0.25"/><c:w val="0.75"/><c:h val="0.5"/>"#)), at(0.1, 0.25, 0.75, 0.5));
+        // `c:wMode`/`c:hMode` `edge` give the right and bottom edges.
+        assert_eq!(
+            laid_out(&format!(
+                r#"{edges}<c:wMode val="edge"/><c:hMode val="edge"/><c:x val="0.1"/><c:y val="0.25"/><c:w val="0.85"/><c:h val="0.75"/>"#
+            )),
+            at(0.1, 0.25, 0.75, 0.5)
+        );
+        // Kept within the frame.
+        assert_eq!(laid_out(&format!(r#"{edges}<c:x val="-0.5"/><c:y val="0.5"/><c:w val="1"/><c:h val="0.8"/>"#)), at(0.0, 0.5, 0.5, 0.5));
+        // Left to the automatic layout: the outer rectangle (the schema's default target), offsets
+        // from the automatic position (the default `factor` mode), missing or senseless numbers.
+        for manual in [
+            r#"<c:layoutTarget val="outer"/><c:xMode val="edge"/><c:yMode val="edge"/><c:x val="0.1"/><c:y val="0.1"/><c:w val="0.8"/><c:h val="0.8"/>"#.to_string(),
+            r#"<c:xMode val="edge"/><c:yMode val="edge"/><c:x val="0.1"/><c:y val="0.1"/><c:w val="0.8"/><c:h val="0.8"/>"#.to_string(),
+            r#"<c:layoutTarget val="inner"/><c:x val="0.1"/><c:y val="0.1"/><c:w val="0.8"/><c:h val="0.8"/>"#.to_string(),
+            format!(r#"{edges}<c:x val="0.1"/><c:y val="0.1"/><c:w val="0.8"/>"#),
+            format!(r#"{edges}<c:x val="NaN"/><c:y val="0.1"/><c:w val="0.8"/><c:h val="0.8"/>"#),
+            format!(r#"{edges}<c:x val="0.1"/><c:y val="0.1"/><c:w val="-0.8"/><c:h val="0.8"/>"#),
+            format!(r#"{edges}<c:x val="1.5"/><c:y val="0.1"/><c:w val="0.8"/><c:h val="0.8"/>"#),
+        ] {
+            assert_eq!(laid_out(&manual), None, "{manual}");
+        }
+        // No `c:manualLayout` at all.
+        let plain = read_chart_xml(hanging_column("minMax", "").as_bytes()).unwrap();
+        assert_eq!(plain.plot_layout, None);
     }
 
     #[test]

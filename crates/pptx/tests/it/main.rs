@@ -1,6 +1,7 @@
 mod anchor;
 mod anim_auto_reverse;
 mod chart_embed;
+mod chart_plot_layout;
 mod comments;
 mod corpus;
 mod corpus_charts;
