@@ -1,6 +1,7 @@
 //! U30: native charts drawn with PowerPoint's plot geometry. A manual inner plot layout puts the
-//! plot exactly where the file says, fixed axis ends are kept exactly, and a deleted value axis
-//! draws nothing. Each chart is XML written here, imported and rendered; no Office file is used.
+//! plot exactly where the file says, fixed axis ends are kept exactly, and deleted axes draw
+//! nothing, also after the chart is edited. Each chart is XML written here, imported and
+//! rendered; no Office file is used.
 
 use std::io::{Cursor, Read, Write};
 use std::sync::Arc;
@@ -23,30 +24,37 @@ const PLOT: (f64, f64, f64, f64) = (120.0, 120.0, 760.0, 390.0);
 
 const RED: [u8; 3] = [255, 0, 0];
 
-/// The value axis' settings that vary between the tests.
+/// The axis settings that vary between the tests.
 #[derive(Clone, Copy)]
-struct ValAx<'a> {
-    /// `c:scaling` children other than the orientation.
+struct Axes<'a> {
+    /// `c:scaling` children of the value axis other than the orientation.
     scaling: &'a str,
     reversed: bool,
+    /// The value axis' `c:delete` and `c:tickLblPos`.
     deleted: bool,
-    /// `c:tickLblPos`.
     tick_labels: &'a str,
     major: Option<f64>,
+    /// The category axis' `c:delete` and `c:tickLblPos`.
+    cat_deleted: bool,
+    cat_labels: &'a str,
 }
+
+/// Both axes shown, the value axis fixed at −10 to 44.
+const SHOWN: Axes<'static> =
+    Axes { scaling: FIXED, reversed: false, deleted: false, tick_labels: "nextTo", major: None, cat_deleted: false, cat_labels: "nextTo" };
 
 /// A clustered column chart of one red series, `values` in categories Q1, Q2…, with a gap
 /// width of 60 %, 10 pt text and no title or legend.
-fn column_chart(values: &[f64], layout: &str, ax: ValAx<'_>) -> String {
+fn column_chart(values: &[f64], layout: &str, ax: Axes<'_>) -> String {
     let n = values.len();
     let pts: String = values.iter().enumerate().map(|(i, v)| format!(r#"<c:pt idx="{i}"><c:v>{v}</c:v></c:pt>"#)).collect();
     let cats: String = (0..n).map(|i| format!(r#"<c:pt idx="{i}"><c:v>Q{}</c:v></c:pt>"#, i + 1)).collect();
     let orientation = if ax.reversed { "maxMin" } else { "minMax" };
-    let ValAx { scaling, tick_labels, .. } = ax;
-    let delete = u8::from(ax.deleted);
+    let Axes { scaling, tick_labels, cat_labels, .. } = ax;
+    let (delete, cat_delete) = (u8::from(ax.deleted), u8::from(ax.cat_deleted));
     let major = ax.major.map(|m| format!(r#"<c:majorUnit val="{m}"/>"#)).unwrap_or_default();
     format!(
-        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><c:chartSpace {NS}><c:chart><c:autoTitleDeleted val="1"/><c:plotArea>{layout}<c:barChart><c:barDir val="col"/><c:grouping val="clustered"/><c:varyColors val="0"/><c:ser><c:idx val="0"/><c:order val="0"/><c:spPr><a:solidFill><a:srgbClr val="FF0000"/></a:solidFill></c:spPr><c:invertIfNegative val="0"/><c:cat><c:strRef><c:strCache><c:ptCount val="{n}"/>{cats}</c:strCache></c:strRef></c:cat><c:val><c:numRef><c:numCache><c:formatCode>General</c:formatCode><c:ptCount val="{n}"/>{pts}</c:numCache></c:numRef></c:val></c:ser><c:gapWidth val="60"/><c:axId val="11"/><c:axId val="12"/></c:barChart><c:catAx><c:axId val="11"/><c:scaling><c:orientation val="minMax"/></c:scaling><c:delete val="0"/><c:axPos val="b"/><c:tickLblPos val="nextTo"/><c:crossAx val="12"/><c:crosses val="autoZero"/></c:catAx><c:valAx><c:axId val="12"/><c:scaling><c:orientation val="{orientation}"/>{scaling}</c:scaling><c:delete val="{delete}"/><c:axPos val="l"/><c:numFmt formatCode="General" sourceLinked="0"/><c:tickLblPos val="{tick_labels}"/><c:crossAx val="11"/><c:crosses val="autoZero"/><c:crossBetween val="between"/>{major}</c:valAx></c:plotArea><c:plotVisOnly val="1"/></c:chart><c:txPr><a:bodyPr/><a:lstStyle/><a:p><a:pPr><a:defRPr sz="1000"/></a:pPr><a:endParaRPr lang="en-US"/></a:p></c:txPr></c:chartSpace>"#
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><c:chartSpace {NS}><c:chart><c:autoTitleDeleted val="1"/><c:plotArea>{layout}<c:barChart><c:barDir val="col"/><c:grouping val="clustered"/><c:varyColors val="0"/><c:ser><c:idx val="0"/><c:order val="0"/><c:spPr><a:solidFill><a:srgbClr val="FF0000"/></a:solidFill></c:spPr><c:invertIfNegative val="0"/><c:cat><c:strRef><c:strCache><c:ptCount val="{n}"/>{cats}</c:strCache></c:strRef></c:cat><c:val><c:numRef><c:numCache><c:formatCode>General</c:formatCode><c:ptCount val="{n}"/>{pts}</c:numCache></c:numRef></c:val></c:ser><c:gapWidth val="60"/><c:axId val="11"/><c:axId val="12"/></c:barChart><c:catAx><c:axId val="11"/><c:scaling><c:orientation val="minMax"/></c:scaling><c:delete val="{cat_delete}"/><c:axPos val="b"/><c:tickLblPos val="{cat_labels}"/><c:crossAx val="12"/><c:crosses val="autoZero"/></c:catAx><c:valAx><c:axId val="12"/><c:scaling><c:orientation val="{orientation}"/>{scaling}</c:scaling><c:delete val="{delete}"/><c:axPos val="l"/><c:numFmt formatCode="General" sourceLinked="0"/><c:tickLblPos val="{tick_labels}"/><c:crossAx val="11"/><c:crosses val="autoZero"/><c:crossBetween val="between"/>{major}</c:valAx></c:plotArea><c:plotVisOnly val="1"/></c:chart><c:txPr><a:bodyPr/><a:lstStyle/><a:p><a:pPr><a:defRPr sz="1000"/></a:pPr><a:endParaRPr lang="en-US"/></a:p></c:txPr></c:chartSpace>"#
     )
 }
 
@@ -175,7 +183,7 @@ fn assert_columns_placed(img: &Image, reversed: bool) {
 /// expect them.
 #[test]
 fn a_manual_inner_layout_places_columns_by_powerpoints_arithmetic() {
-    let ax = ValAx { scaling: FIXED, reversed: false, deleted: true, tick_labels: "nextTo", major: None };
+    let ax = Axes { deleted: true, ..SHOWN };
     let p = deck(&column_chart(&VALUES, LAYOUT, ax));
     let c = chart_of(&p);
     assert_eq!(c.plot_layout, Some(PlotLayout { x: 0.1, y: 0.2, w: 0.8, h: 0.6 }));
@@ -199,7 +207,7 @@ fn a_manual_inner_layout_places_columns_by_powerpoints_arithmetic() {
 /// in the same slots.
 #[test]
 fn a_manual_inner_layout_works_with_a_reversed_value_axis() {
-    let ax = ValAx { scaling: FIXED, reversed: true, deleted: true, tick_labels: "nextTo", major: None };
+    let ax = Axes { reversed: true, deleted: true, ..SHOWN };
     let p = deck(&column_chart(&VALUES, LAYOUT, ax));
     assert!(chart_of(&p).y_reversed);
     let img = image(&p);
@@ -216,7 +224,7 @@ fn a_manual_inner_layout_works_with_a_reversed_value_axis() {
 #[test]
 fn fixed_axis_ends_are_drawn_exactly() {
     let values = [100.0, 288.0, 150.0, 50.0];
-    let ax = ValAx { scaling: r#"<c:max val="288"/><c:min val="0"/>"#, reversed: false, deleted: false, tick_labels: "nextTo", major: Some(50.0) };
+    let ax = Axes { scaling: r#"<c:max val="288"/><c:min val="0"/>"#, major: Some(50.0), ..SHOWN };
     let p = deck(&column_chart(&values, LAYOUT, ax));
     let img = image(&p);
     let got = bars(&img);
@@ -238,18 +246,106 @@ fn fixed_axis_ends_are_drawn_exactly() {
 /// and no labels; the plot keeps its place.
 #[test]
 fn a_deleted_value_axis_draws_nothing() {
-    let shown = ValAx { scaling: FIXED, reversed: false, deleted: false, tick_labels: "nextTo", major: None };
+    let shown = SHOWN;
     // Left of the plot, from above its top to below its bottom (the category labels are under
     // the columns, further right).
     let strip = (FRAME.0 as u32, PLOT.1 as u32 - 10, PLOT.0 as u32 - 1, PLOT.3 as u32 + 10);
     let img = image(&deck(&column_chart(&VALUES, LAYOUT, shown)));
     assert!(text(&img, strip), "a shown axis has its labels there");
     assert_columns_placed(&img, false);
-    for hidden in [ValAx { deleted: true, ..shown }, ValAx { tick_labels: "none", ..shown }] {
+    for hidden in [Axes { deleted: true, ..shown }, Axes { tick_labels: "none", ..shown }] {
         let p = deck(&column_chart(&VALUES, LAYOUT, hidden));
         assert!(chart_of(&p).y_hidden);
         let img = image(&p);
         assert!(!ink(&img, strip), "nothing left of the plot (deleted {}, tickLblPos {})", hidden.deleted, hidden.tick_labels);
         assert_columns_placed(&img, false);
     }
+}
+
+/// The light grey category axis line along zero (y 340), looked for between the first two
+/// columns.
+const BASELINE: (u32, u32, u32, u32) = (256, 336, 304, 344);
+/// Under the first column, where its label Q1 goes.
+const Q1_BELOW: (u32, u32, u32, u32) = (180, 393, 220, 410);
+
+/// A deleted category axis (the add-in's charts carry their own label text boxes) draws neither
+/// its labels nor its line. With only its labels off (`c:tickLblPos none`) the line stays.
+#[test]
+fn a_deleted_category_axis_draws_no_labels_and_no_line() {
+    let img = image(&deck(&column_chart(&VALUES, LAYOUT, SHOWN)));
+    assert!(text(&img, Q1_BELOW) && ink(&img, BASELINE), "shown: labels and line");
+
+    let p = deck(&column_chart(&VALUES, LAYOUT, Axes { deleted: true, cat_deleted: true, ..SHOWN }));
+    let c = chart_of(&p);
+    assert!(c.cat_hidden && c.cat_deleted);
+    let img = image(&p);
+    assert!(!ink(&img, (PLOT.0 as u32, PLOT.3 as u32 + 2, PLOT.2 as u32, 479)), "nothing under the plot");
+    assert!(!ink(&img, BASELINE), "no axis line");
+    assert_columns_placed(&img, false);
+
+    let p = deck(&column_chart(&VALUES, LAYOUT, Axes { cat_labels: "none", ..SHOWN }));
+    let c = chart_of(&p);
+    assert!(c.cat_hidden && !c.cat_deleted);
+    let img = image(&p);
+    assert!(!text(&img, Q1_BELOW) && ink(&img, BASELINE), "labels off, line kept");
+    assert_columns_placed(&img, false);
+}
+
+/// Laid out automatically, a chart whose category axis is deleted keeps no empty band for its
+/// labels: the plot reaches further down, as the value axis' gutter already did.
+#[test]
+fn a_deleted_category_axis_leaves_no_label_band() {
+    let values = [12.0, 30.0, 6.0, 44.0];
+    let fixed = Axes { scaling: r#"<c:max val="44"/><c:min val="0"/>"#, ..SHOWN };
+    let bottom = |ax: Axes<'_>| {
+        let got = bars(&image(&deck(&column_chart(&values, "<c:layout/>", ax))));
+        assert_eq!(got.len(), 4, "{got:?}");
+        assert!(got.iter().all(|b| b.3 == got[0].3), "the columns stand on one line: {got:?}");
+        got[0].3
+    };
+    // The chart's area ends at 96 % of the frame (30 + 432 = 462); the 10 pt labels' band takes
+    // 1.8 × 10 above it, a hidden axis only a 0.5 × 10 margin.
+    assert!(near(bottom(fixed), 444.0), "{}", bottom(fixed));
+    assert!(near(bottom(Axes { cat_deleted: true, ..fixed }), 457.0), "{}", bottom(Axes { cat_deleted: true, ..fixed }));
+}
+
+/// The XML of the one chart part in a saved deck.
+fn chart_part(bytes: &[u8]) -> String {
+    let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).expect("zip");
+    let names: Vec<String> = zip.file_names().filter(|n| n.starts_with("ppt/charts/chart") && n.ends_with(".xml")).map(str::to_string).collect();
+    assert_eq!(names.len(), 1, "{names:?}");
+    let mut xml = String::new();
+    zip.by_name(&names[0]).expect("chart part").read_to_string(&mut xml).expect("utf-8");
+    xml
+}
+
+/// Editing the chart writes its part anew: the deleted axes stay deleted and the plot keeps its
+/// manual layout, so overlays still line up after a save.
+#[test]
+fn an_edited_chart_keeps_its_deleted_axes_and_its_layout() {
+    let mut p = deck(&column_chart(&VALUES, LAYOUT, Axes { deleted: true, cat_deleted: true, ..SHOWN }));
+    let slide = Arc::make_mut(&mut p.slides[0]);
+    let c = slide.shapes.iter_mut().find_map(|s| if let ShapeKind::Chart(c) = &mut s.kind { Some(c) } else { None }).expect("a chart");
+    c.series[0].values[0] = Some(20.0);
+    let bytes = deckcraft_pptx::export(&p).expect("export");
+    let xml = chart_part(&bytes);
+    assert!(!xml.contains(r#"<c:axId val="11"/>"#), "the part was written anew");
+    assert!(xml.contains(r#"<c:layoutTarget val="inner"/><c:xMode val="edge"/><c:yMode val="edge"/>"#), "{xml}");
+    assert_eq!(xml.matches(r#"<c:delete val="1"/>"#).count(), 2, "{xml}");
+
+    let back = deckcraft_pptx::import(&bytes).expect("import");
+    let c = chart_of(&back);
+    assert!(c.y_deleted && c.y_hidden && c.cat_deleted && c.cat_hidden);
+    assert_eq!(c.plot_layout, Some(PlotLayout { x: 0.1, y: 0.2, w: 0.8, h: 0.6 }));
+    let img = image(&back);
+    let got = bars(&img);
+    assert_eq!(got.len(), 4, "{got:?}");
+    assert!(near(got[0].1, value_y(20.0, RANGE, false)), "the edited column: {:?}", got[0]);
+    for (i, (&(l, t, r, _), &v)) in got.iter().zip(&VALUES).enumerate().skip(1) {
+        let (want_l, want_r) = column_x(i, VALUES.len(), 60.0);
+        let want_t = value_y(v.max(0.0), RANGE, false);
+        assert!(near(l, want_l) && near(r, want_r) && near(t, want_t), "column {i}: {l}..{r}, top {t}");
+    }
+    let strip = (FRAME.0 as u32, PLOT.1 as u32 - 10, PLOT.0 as u32 - 1, PLOT.3 as u32 + 10);
+    assert!(!ink(&img, strip) && !ink(&img, BASELINE) && !text(&img, Q1_BELOW), "still nothing drawn for either axis");
 }

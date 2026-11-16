@@ -483,6 +483,11 @@ fn crosses(w: &mut W, at: AxisCrosses) {
 const AX_CAT: u32 = 50_001;
 const AX_VAL: u32 = 50_002;
 
+/// `c:tickLblPos`: `none` hides an axis' labels but keeps its line (`c:delete` removes both).
+fn tick_labels(hidden: bool) -> &'static str {
+    if hidden { "none" } else { "nextTo" }
+}
+
 fn axes(w: &mut W, c: &Chart, g: Group) {
     let horizontal = c.kind.horizontal() && g == Group::Bar;
     let (cat_pos, val_pos) = if horizontal { ("l", "b") } else { ("b", "l") };
@@ -492,7 +497,7 @@ fn axes(w: &mut W, c: &Chart, g: Group) {
         w.open0("c:scaling");
         w.val("c:orientation", "minMax");
         w.close("c:scaling");
-        w.val("c:delete", 0);
+        w.val("c:delete", u8::from(c.cat_deleted));
         w.val("c:axPos", "b");
         if let Some(t) = &c.axis_titles.0 {
             title(w, t, c);
@@ -500,7 +505,7 @@ fn axes(w: &mut W, c: &Chart, g: Group) {
         w.empty("c:numFmt", A::new().a("formatCode", "General").a("sourceLinked", 1));
         w.val("c:majorTickMark", "out");
         w.val("c:minorTickMark", "none");
-        w.val("c:tickLblPos", "nextTo");
+        w.val("c:tickLblPos", tick_labels(c.cat_hidden));
         tx_pr(w, c);
         w.val("c:crossAx", AX_VAL);
         crosses(w, c.y_crosses);
@@ -512,7 +517,7 @@ fn axes(w: &mut W, c: &Chart, g: Group) {
         w.open0("c:scaling");
         w.val("c:orientation", if c.cat_reversed { "maxMin" } else { "minMax" });
         w.close("c:scaling");
-        w.val("c:delete", 0);
+        w.val("c:delete", u8::from(c.cat_deleted));
         w.val("c:axPos", cat_pos);
         if let Some(t) = &c.axis_titles.0 {
             title(w, t, c);
@@ -520,7 +525,7 @@ fn axes(w: &mut W, c: &Chart, g: Group) {
         w.empty("c:numFmt", A::new().a("formatCode", "General").a("sourceLinked", 1));
         w.val("c:majorTickMark", "none");
         w.val("c:minorTickMark", "none");
-        w.val("c:tickLblPos", "nextTo");
+        w.val("c:tickLblPos", tick_labels(c.cat_hidden));
         tx_pr(w, c);
         w.val("c:crossAx", AX_VAL);
         crosses(w, c.y_crosses);
@@ -544,7 +549,7 @@ fn axes(w: &mut W, c: &Chart, g: Group) {
         w.val("c:min", fmt_num(m));
     }
     w.close("c:scaling");
-    w.val("c:delete", 0);
+    w.val("c:delete", u8::from(c.y_deleted));
     w.val("c:axPos", val_pos);
     if c.gridlines {
         w.empty0("c:majorGridlines");
@@ -561,7 +566,7 @@ fn axes(w: &mut W, c: &Chart, g: Group) {
     }
     w.val("c:majorTickMark", "none");
     w.val("c:minorTickMark", "none");
-    w.val("c:tickLblPos", "nextTo");
+    w.val("c:tickLblPos", tick_labels(c.y_hidden));
     tx_pr(w, c);
     w.val("c:crossAx", AX_CAT);
     w.val("c:crosses", "autoZero");
@@ -1362,6 +1367,28 @@ mod tests {
             let xml = super::chart_xml(&c).0;
             assert!(String::from_utf8_lossy(&xml).contains("<c:plotArea><c:layout/>"), "{kind:?}");
             assert_eq!(crate::read::chart::read_chart_xml(&xml).unwrap().plot_layout, None);
+        }
+    }
+
+    /// A rebuilt chart keeps a deleted axis deleted, and an axis without labels without them.
+    #[test]
+    fn deleted_axes_and_axes_without_labels_round_trip() {
+        // (labels hidden, deleted)
+        let states = [(false, false), (true, false), (true, true)];
+        for kind in [ChartType::Column, ChartType::Bar, ChartType::Line, ChartType::Scatter] {
+            for cat in states {
+                for val in states {
+                    let mut c = Chart::sample(kind);
+                    (c.cat_hidden, c.cat_deleted) = cat;
+                    (c.y_hidden, c.y_deleted) = val;
+                    let xml = super::chart_xml(&c).0;
+                    let back = crate::read::chart::read_chart_xml(&xml).unwrap();
+                    assert_eq!(((back.cat_hidden, back.cat_deleted), (back.y_hidden, back.y_deleted)), (cat, val), "{kind:?}");
+                    // In the schema's order: `c:delete` straight after `c:scaling`.
+                    let text = String::from_utf8_lossy(&xml);
+                    assert_eq!(text.matches(r#"</c:scaling><c:delete val=""#).count(), 2, "{kind:?}");
+                }
+            }
         }
     }
 }

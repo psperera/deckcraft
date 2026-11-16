@@ -453,8 +453,11 @@ fn read_axes<'a>(c: &mut Chart, pa: &'a El, primary_val: &Option<String>) -> (Op
         Some(n) if n.attr("sourceLinked") != Some("1") => n.attr("formatCode").map(str::to_string),
         n => source_format(a).or_else(|| n.and_then(|n| n.attr("formatCode")).map(str::to_string)),
     };
-    // `c:tickLblPos val="none"` hides the labels just as `c:delete` does.
-    let deleted = |a: &El| a.child("delete").and_then(|d| d.bool("val")) == Some(true) || a.child_val("tickLblPos") == Some("none");
+    // `c:delete` removes the whole axis, its line too. A bare `<c:delete/>` takes the schema's
+    // default, true.
+    let deleted = |a: &El| a.child("delete").is_some_and(|d| d.attr("val").is_none() || d.bool("val") == Some(true));
+    // `c:tickLblPos val="none"` hides the labels as `c:delete` does, but keeps the line.
+    let no_labels = |a: &El| deleted(a) || a.child_val("tickLblPos") == Some("none");
     // A gridline whose `c:spPr/a:ln` has `a:noFill` is not drawn, though the element is there.
     let grid =
         |a: &El, k: &str| a.child(k).is_some_and(|g| !g.child("spPr").and_then(|p| p.child("ln")).is_some_and(|l| l.child("noFill").is_some()));
@@ -467,7 +470,7 @@ fn read_axes<'a>(c: &mut Chart, pa: &'a El, primary_val: &Option<String>) -> (Op
             c.y2_max = sc.and_then(|s| num(s, "max"));
             c.y2_major = num(a, "majorUnit");
             c.y2_format = format_code(a);
-            c.y2_hidden = deleted(a);
+            c.y2_hidden = no_labels(a);
             c.y2_reversed = reversed(a);
             c.y2_crosses = crossing(pa, a);
         }
@@ -483,11 +486,14 @@ fn read_axes<'a>(c: &mut Chart, pa: &'a El, primary_val: &Option<String>) -> (Op
         c.y_major = num(v, "majorUnit");
         c.y_log_base = sc.and_then(|s| s.child_val("logBase")).and_then(|v| v.parse().ok()).filter(|b: &f64| b.is_finite() && *b >= 2.0);
         c.y_format = format_code(v);
-        c.y_hidden = deleted(v);
+        c.y_hidden = no_labels(v);
+        c.y_deleted = deleted(v);
         c.y_reversed = reversed(v);
         c.y_crosses = crossing(pa, v);
     }
     if let Some(a) = cat_ax {
+        c.cat_hidden = no_labels(a);
+        c.cat_deleted = deleted(a);
         c.cat_reversed = reversed(a);
         c.axis_titles.0 = a.child("title").map(|t| rich_text(t).unwrap_or_else(|| "Axis Title".into()));
     }
@@ -1096,6 +1102,28 @@ mod tests {
         )
         .unwrap();
         assert!(!c.gridlines && !c.minor_gridlines && c.y_hidden);
+    }
+
+    /// `c:delete` removes an axis, line and all; `c:tickLblPos none` only its labels.
+    #[test]
+    fn deleted_axes_are_told_from_axes_without_labels() {
+        let xml = |cat: &str, val: &str| {
+            format!(
+                r#"<c:chartSpace xmlns:c="{NS_C}"><c:chart><c:plotArea><c:barChart><c:barDir val="col"/><c:axId val="1"/><c:axId val="2"/></c:barChart><c:catAx><c:axId val="1"/>{cat}<c:axPos val="b"/><c:crossAx val="2"/></c:catAx><c:valAx><c:axId val="2"/>{val}<c:axPos val="l"/><c:crossAx val="1"/></c:valAx></c:plotArea></c:chart></c:chartSpace>"#
+            )
+        };
+        let read = |cat: &str, val: &str| {
+            let c = read_chart_xml(xml(cat, val).as_bytes()).unwrap();
+            ((c.cat_hidden, c.cat_deleted), (c.y_hidden, c.y_deleted))
+        };
+        let (shown, no_labels, deleted) = ((false, false), (true, false), (true, true));
+        assert_eq!(read("", ""), (shown, shown));
+        assert_eq!(read(r#"<c:delete val="0"/>"#, r#"<c:delete val="false"/>"#), (shown, shown));
+        assert_eq!(read(r#"<c:delete val="1"/>"#, r#"<c:delete val="true"/>"#), (deleted, deleted));
+        // A bare `c:delete` takes the schema's default, true.
+        assert_eq!(read("<c:delete/>", "<c:delete/>"), (deleted, deleted));
+        assert_eq!(read(r#"<c:tickLblPos val="none"/>"#, r#"<c:delete val="0"/><c:tickLblPos val="none"/>"#), (no_labels, no_labels));
+        assert_eq!(read(r#"<c:delete val="1"/>"#, r#"<c:tickLblPos val="nextTo"/>"#), (deleted, shown));
     }
 
     #[test]

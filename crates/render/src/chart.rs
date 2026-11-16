@@ -282,14 +282,15 @@ fn primary_crossing(c: &Chart, log_base: Option<f64>, (min, max): (f64, f64), to
 }
 
 /// The plot within `area`, leaving the value labels' gutters (`gutters`: left, and right for a
-/// secondary axis; a bar chart's category labels take the first) and the category labels' band:
-/// below the plot (left of a bar chart's), or above it (right of it) when they go on the far side.
-fn plot_rect(area: Rect, horiz: bool, far: bool, (gutter, gutter_r): (f64, f64), base: f64) -> Rect {
+/// secondary axis; a bar chart's category labels take the first) and a column chart's category
+/// band, `cat_band` deep: below the plot, or above it when the labels go on the far side (a bar
+/// chart's go right of it).
+fn plot_rect(area: Rect, horiz: bool, far: bool, (gutter, gutter_r): (f64, f64), cat_band: f64, base: f64) -> Rect {
     match (horiz, far) {
         (true, false) => Rect::new(area.x0 + gutter, area.y0, area.x1, area.y1 - base * 1.6),
         (true, true) => Rect::new(area.x0, area.y0, area.x1 - gutter, area.y1 - base * 1.6),
-        (false, false) => Rect::new(area.x0 + gutter, area.y0, area.x1 - gutter_r, area.y1 - base * 1.8),
-        (false, true) => Rect::new(area.x0 + gutter, area.y0 + base * 1.8, area.x1 - gutter_r, area.y1),
+        (false, false) => Rect::new(area.x0 + gutter, area.y0, area.x1 - gutter_r, area.y1 - cat_band),
+        (false, true) => Rect::new(area.x0 + gutter, area.y0 + cat_band, area.x1 - gutter_r, area.y1),
     }
 }
 
@@ -408,13 +409,9 @@ fn draw_inner(ctx: &mut RenderContext, rctx: &Ctx, c: &Chart, frame: ChartFrame<
     // A plot the file fixes (`c:manualLayout`, inner) goes exactly there, at its fractions of the
     // chart frame, whatever the title, legend and labels take.
     let manual = c.plot_layout.and_then(PlotLayout::sanitized).map(|l| Rect::new(l.x * w, l.y * h, (l.x + l.w) * w, (l.y + l.h) * h));
+    let cat_room = category_room(c, horiz, base);
     // As many major units as the value axis has room for labels (PowerPoint's automatic unit).
-    let axis_len = match manual {
-        Some(p) if horiz => p.width(),
-        Some(p) => p.height(),
-        None if horiz => area.width() - base * 4.5,
-        None => area.height() - base * 1.8,
-    };
+    let axis_len = value_axis_len(manual, area, horiz, cat_room);
     let max_intervals = (axis_len / if horiz { base * 6.0 } else { base * 1.9 }).floor().clamp(2.0, 12.0) as usize;
     // A logarithmic axis is scaled in exponents of its base.
     let log = c.log_axis_scale(max_intervals).map(|sc| (c.y_log_base.unwrap_or(10.0), sc));
@@ -436,7 +433,7 @@ fn draw_inner(ctx: &mut RenderContext, rctx: &Ctx, c: &Chart, frame: ChartFrame<
         vals.iter().map(|v| c.axis_label(sec, *v).chars().count()).max().unwrap_or(1) as f64 * base * 0.55 + base * 0.6
     };
     let gutter = if horiz {
-        base * 4.5
+        cat_room
     } else if c.y_hidden {
         base * 0.5
     } else {
@@ -444,7 +441,7 @@ fn draw_inner(ctx: &mut RenderContext, rctx: &Ctx, c: &Chart, frame: ChartFrame<
     };
     let gutter_r = second.filter(|_| !c.y2_hidden).map(|sc| clamp_soft(label_w(true, sc), base * 1.5, area.width() * 0.3)).unwrap_or(0.0);
     let (origin, cat_far) = primary_crossing(c, log.map(|(b, _)| b), (min, max), &to_e);
-    let plot = manual.unwrap_or_else(|| plot_rect(area, horiz, cat_far, (gutter, gutter_r), base));
+    let plot = manual.unwrap_or_else(|| plot_rect(area, horiz, cat_far, (gutter, gutter_r), cat_room, base));
     // Around a fixed plot the tick labels may use the whole frame.
     let area = if manual.is_some() { Rect::new(0.0, 0.0, w, h).union(plot) } else { area };
     if let Some(f) = &c.plot_fill {
@@ -592,8 +589,14 @@ fn draw_inner(ctx: &mut RenderContext, rctx: &Ctx, c: &Chart, frame: ChartFrame<
         ctx.set_stroke(kurbo::Stroke::new(0.75));
         ctx.stroke_path(&p);
     }
-    // The category axis line, where it crosses the value axis.
-    let cross = to_v(origin);
+    // The category axis line, where it crosses the value axis; a deleted axis has none.
+    if !c.cat_deleted {
+        draw_category_axis_line(ctx, m, plot, horiz, to_v(origin));
+    }
+}
+
+/// The category axis line across `plot` at `cross` along the value axis.
+fn draw_category_axis_line(ctx: &mut RenderContext, m: Affine, plot: Rect, horiz: bool, cross: f64) {
     let mut ax = BezPath::new();
     if horiz {
         ax.move_to((cross, plot.y0));
@@ -606,6 +609,27 @@ fn draw_inner(ctx: &mut RenderContext, rctx: &Ctx, c: &Chart, frame: ChartFrame<
     ctx.set_paint(color(Rgba::rgb(0xBF, 0xBF, 0xBF), 1.0));
     ctx.set_stroke(kurbo::Stroke::new(0.75));
     ctx.stroke_path(&ax);
+}
+
+/// The category labels' room: beside a bar chart's plot, under (or over) a column chart's. A
+/// category axis without labels keeps only a margin, as the value axis does.
+fn category_room(c: &Chart, horiz: bool, base: f64) -> f64 {
+    match (c.cat_hidden, horiz) {
+        (true, _) => base * 0.5,
+        (false, true) => base * 4.5,
+        (false, false) => base * 1.8,
+    }
+}
+
+/// The value axis' length, to size its automatic major unit: along a fixed plot, or along the
+/// area less the category labels' room.
+fn value_axis_len(manual: Option<Rect>, area: Rect, horiz: bool, cat_room: f64) -> f64 {
+    match manual {
+        Some(p) if horiz => p.width(),
+        Some(p) => p.height(),
+        None if horiz => area.width() - cat_room,
+        None => area.height() - cat_room,
+    }
 }
 
 struct LegendDraw<'a, 'ctx> {
@@ -842,6 +866,11 @@ struct CategoryLabelDrawing<'a, 'ctx> {
 fn draw_category_labels(ctx: &mut RenderContext, draw: &CategoryLabelDrawing<'_, '_>) {
     let rctx = draw.rctx;
     let c = draw.chart;
+    // A deleted category axis, or one with its labels off, has no labels (nor x tick labels on a
+    // scatter chart).
+    if c.cat_hidden {
+        return;
+    }
     let m = draw.transform;
     let area = draw.area;
     let plot = draw.plot;

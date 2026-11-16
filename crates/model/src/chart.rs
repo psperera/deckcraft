@@ -443,8 +443,21 @@ pub struct Chart {
     pub y_log_base: Option<f64>,
     /// The value axis' number format (an Excel format code such as `#,##0` or `0.0%`).
     pub y_format: Option<String>,
-    /// The value axis is deleted (`c:delete`): no labels, though gridlines may stay.
+    /// The value axis shows no tick labels: it is deleted (`c:delete`) or its labels are off
+    /// (`c:tickLblPos val="none"`). Gridlines may stay.
     pub y_hidden: bool,
+    /// The value axis is deleted (`c:delete val="1"`), not just without labels: written back as
+    /// deleted. Set together with `y_hidden`.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub y_deleted: bool,
+    /// The category axis shows no labels: it is deleted (`c:delete`) or its labels are off
+    /// (`c:tickLblPos val="none"`).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub cat_hidden: bool,
+    /// The category axis is deleted (`c:delete val="1"`): no labels and no axis line. Set together
+    /// with `cat_hidden`.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub cat_deleted: bool,
     /// The category axis runs backwards (`c:orientation val="maxMin"`): right to left, or on a
     /// horizontal bar chart top to bottom (the default puts the first category at the bottom).
     pub cat_reversed: bool,
@@ -595,6 +608,9 @@ impl Default for Chart {
             y_log_base: None,
             y_format: None,
             y_hidden: false,
+            y_deleted: false,
+            cat_hidden: false,
+            cat_deleted: false,
             cat_reversed: false,
             y_reversed: false,
             y_crosses: AxisCrosses::AutoZero,

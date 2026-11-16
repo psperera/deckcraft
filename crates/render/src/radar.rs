@@ -52,7 +52,7 @@ pub fn draw(ctx: &mut RenderContext, rctx: &Ctx, c: &Chart, m: Affine, area: Rec
         ctx.set_transform(m);
         ctx.set_paint(color(grid_col, 1.0));
         ctx.stroke_path(&p);
-        if let Some(name) = c.categories.get(i) {
+        if let Some(name) = c.categories.get(i).filter(|_| !c.cat_hidden) {
             let q = spoke(cen, r + base * 1.3, i, n, 1.0);
             let w = name.chars().count() as f64 * base * 0.55 + base;
             let align = if (q.x - cen.x).abs() < base {
