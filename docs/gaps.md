@@ -188,8 +188,9 @@ Detail in [file-format-parity.md](file-format-parity.md).
   `c:dispBlanksAs` is honoured for lines; area and radar charts don't break at a missing point.
   Per-point data labels keep their own text and visibility; their own position, number format
   and style are not kept, and line and area charts draw no data labels.
-  Markers keep their symbol, size, fill and outline; a picture marker is drawn as a circle, and a
-  single point's own marker (`c:dPt/c:marker`) is not kept.
+  Markers keep their symbol, size, fill and outline, a single point's own marker
+  (`c:dPt/c:marker`) included; a picture marker is drawn as a circle, and a point's own line
+  segment on a line chart (`c:dPt/c:spPr`) is not kept.
   The primary axis survives chart rebuilds. A combo chart's secondary value axis is read
   (`y2_*`, `Series.secondary_axis`) but is not written back when the chart is rebuilt.
   An unchanged chart's embedded workbook now survives save (#335); editing the chart still

@@ -258,6 +258,37 @@ pub struct Series {
     /// point.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub point_labels: Vec<PointLabel>,
+    /// Markers set apart from the series' own (`c:dPt/c:marker`), sorted by point, one per point.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub point_markers: Vec<PointMarker>,
+}
+
+impl Series {
+    /// Point `i`'s own marker, if it has one.
+    pub fn point_marker(&self, i: usize) -> Option<&PointMarker> {
+        self.point_markers.binary_search_by_key(&i, |m| m.idx).ok().and_then(|k| self.point_markers.get(k))
+    }
+}
+
+/// One point's marker where it differs from its series' (`c:dPt/c:marker`). Each part it leaves
+/// unset follows the series.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct PointMarker {
+    /// The point (`c:idx`).
+    pub idx: usize,
+    /// Its own symbol (`c:symbol`); `none` hides the point's marker.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub symbol: Option<String>,
+    /// Its own size in points (`c:size`, 2 to 72).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<u8>,
+    /// Its own fill (`c:spPr`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fill: Option<Fill>,
+    /// Its own outline (`c:spPr/a:ln`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line: Option<Line>,
 }
 
 /// One point's data label where it differs from its series' (`c:dLbl`): shown or hidden on its

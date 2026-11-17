@@ -3256,6 +3256,31 @@ fn region_map_draws_tiles_on_its_colour_scale() {
     assert!(seen.len() >= 5, "{} colours", seen.len());
 }
 
+/// U31: a radar point's own marker (`c:dPt/c:marker`) shows on a series without markers, in one
+/// place, and `none` on every point hides a series' markers.
+#[test]
+fn radar_points_take_their_own_markers() {
+    use deckcraft_model::chart::PointMarker;
+    const MAGENTA: [u8; 3] = [0xC0, 0x00, 0xC0];
+    let radar = |marker: Option<&str>, points: Vec<PointMarker>| {
+        let mut c = Chart::sample(ChartType::Radar);
+        for s in &mut c.series {
+            s.marker = None;
+        }
+        let s = &mut c.series[0];
+        (s.marker, s.marker_size, s.marker_fill, s.point_markers) = (marker.map(String::from), Some(20), Some(solid_rgb(MAGENTA)), points);
+        painted_box(&chart_image(c), MAGENTA, 0..960)
+    };
+    let own = |idx: usize, symbol: &str| PointMarker { idx, symbol: Some(symbol.into()), ..Default::default() };
+    assert_eq!(radar(None, vec![]), None, "no markers");
+    // One 20 pt circle: its inside, painted exactly, is a box of about 18 px.
+    let picked = radar(None, vec![own(0, "circle")]);
+    assert!(picked.is_some_and(|(x0, y0, x1, y1)| (14..=20).contains(&(x1 - x0)) && (14..=20).contains(&(y1 - y0))), "{picked:?}");
+    let n = Chart::sample(ChartType::Radar).series[0].values.len();
+    assert!(radar(Some("circle"), vec![]).is_some_and(|(x0, _, x1, _)| x1 - x0 > 40), "the series' markers");
+    assert_eq!(radar(Some("circle"), (0..n).map(|i| own(i, "none")).collect()), None, "every point's hidden");
+}
+
 /// Radar charts are polar, stock charts draw high-low lines (and up/down bars), and a combo
 /// chart draws its line series over its columns.
 #[test]

@@ -1,6 +1,8 @@
 //! Chart parts (`c:chartSpace`) → [`Chart`]. The original XML is kept in `Chart.raw`.
 
-use deckcraft_model::chart::{AxisCrosses, Blanks, Chart, ChartType, ErrorBars, LabelPart, PlotLayout, PointLabel, Series, Trendline, TrendlineType};
+use deckcraft_model::chart::{
+    AxisCrosses, Blanks, Chart, ChartType, ErrorBars, LabelPart, PlotLayout, PointLabel, PointMarker, Series, Trendline, TrendlineType,
+};
 use deckcraft_model::style::Fill;
 
 use crate::xml::El;
@@ -473,7 +475,7 @@ fn read_error_bars(s: &El, kind: ChartType, budget: &mut usize) -> Option<ErrorB
     })
 }
 
-/// A series' marker size in points (`c:marker/c:size`): the schema's 2 to 72, and 5 for a bare
+/// A series' or point's marker size in points (`c:marker/c:size`): the schema's 2 to 72, and 5 for a bare
 /// `<c:size/>`, its default. None when the element is missing or not a whole number.
 fn marker_size(s: &El) -> Option<u8> {
     let size = s.path(&["marker", "size"])?;
@@ -482,6 +484,35 @@ fn marker_size(s: &El) -> Option<u8> {
         Some(v) => v.trim().parse::<u8>().ok()?,
     };
     Some(n.clamp(2, 72))
+}
+
+/// Most `c:dPt` elements of one series looked at for markers of their own.
+const MAX_POINT_MARKERS: usize = 4096;
+
+/// A series' points with markers of their own (`c:dPt/c:marker`), sorted by point; the file's
+/// first for a point is kept. A marker that sets nothing is left out. Its symbol is kept as
+/// written, `none` included: that hides the point's marker.
+fn point_markers(s: &El) -> Vec<PointMarker> {
+    let mut out: Vec<PointMarker> = s
+        .children_named("dPt")
+        .take(MAX_POINT_MARKERS)
+        .filter_map(|dp| {
+            let idx = dp.child("idx").and_then(|i| i.u32("val"))? as usize;
+            let mk = dp.child("marker")?;
+            let m = PointMarker {
+                idx,
+                symbol: mk.child("symbol").and_then(|e| e.attr("val")).map(String::from),
+                size: marker_size(dp),
+                fill: simple_fill(mk.child("spPr")),
+                line: simple_line(mk.child("spPr")),
+            };
+            (m.symbol.is_some() || m.size.is_some() || m.fill.is_some() || m.line.is_some()).then_some(m)
+        })
+        .collect();
+    // A stable sort, so the file's first marker for a point is the one kept.
+    out.sort_by_key(|m| m.idx);
+    out.dedup_by_key(|m| m.idx);
+    out
 }
 
 /// One `c:ser` of group `g`. `group` is (chart type, on the secondary axis, the group's data-label
@@ -518,6 +549,7 @@ fn read_series(s: &El, g: &El, group: (ChartType, bool, Option<bool>), categorie
     }
     ser.number_format = label_number_format(s, g);
     ser.point_labels = point_labels(s);
+    ser.point_markers = point_markers(s);
     for dp in s.children_named("dPt") {
         if let (Some(i), Some(f)) = (dp.child("idx").and_then(|i| i.u32("val")), simple_fill(dp.child("spPr"))) {
             ser.point_fills.push((i as usize, f));
@@ -1289,6 +1321,43 @@ mod tests {
         }
         let s = series_of(r#"<c:marker><c:symbol val="square"/></c:marker>"#);
         assert_eq!((s.marker_size, s.marker_fill, s.marker_line), (None, None, None));
+    }
+
+    /// U31: a point's own marker (`c:dPt/c:marker`), as PowerPoint writes one to pick out a point
+    /// on a line without markers. `none` is kept (it hides the point's marker); a point without a
+    /// marker, or with one that sets nothing, has none; the file's first for a point wins.
+    #[test]
+    fn point_markers_are_read() {
+        use deckcraft_model::chart::PointMarker;
+        use deckcraft_model::style::Fill;
+        let dpt = |idx: u32, body: &str| format!(r#"<c:dPt><c:idx val="{idx}"/>{body}<c:bubble3D val="0"/></c:dPt>"#);
+        let own = r#"<c:marker><c:symbol val="circle"/><c:size val="10"/><c:spPr><a:solidFill><a:srgbClr val="ED7D31"/></a:solidFill><a:ln w="25400"><a:solidFill><a:srgbClr val="00B050"/></a:solidFill></a:ln></c:spPr></c:marker>"#;
+        let segment = r#"<c:spPr><a:ln w="28575"><a:solidFill><a:srgbClr val="FF0000"/></a:solidFill></a:ln></c:spPr>"#;
+        let points = [
+            dpt(4, &format!("{own}{segment}")),
+            dpt(1, r#"<c:marker><c:symbol val="none"/></c:marker>"#),
+            dpt(2, segment),
+            dpt(3, "<c:marker/>"),
+            dpt(4, r#"<c:marker><c:symbol val="square"/></c:marker>"#),
+            dpt(0, r#"<c:marker><c:size val="9"/></c:marker>"#),
+        ]
+        .concat();
+        let xml = format!(
+            r#"<c:chartSpace xmlns:c="{NS_C}" xmlns:a="{NS_A}"><c:chart><c:plotArea><c:lineChart><c:grouping val="standard"/><c:ser><c:idx val="0"/><c:order val="0"/><c:marker><c:symbol val="none"/></c:marker>{points}<c:val><c:numLit><c:ptCount val="5"/><c:pt idx="0"><c:v>1</c:v></c:pt></c:numLit></c:val></c:ser><c:marker val="1"/></c:lineChart></c:plotArea></c:chart></c:chartSpace>"#
+        );
+        let s = read_chart_xml(xml.as_bytes()).unwrap().series.remove(0);
+        assert_eq!(s.marker, None);
+        let m = &s.point_markers;
+        assert_eq!(m.iter().map(|m| m.idx).collect::<Vec<_>>(), [0, 1, 4], "{m:?}");
+        assert_eq!(m[0], PointMarker { idx: 0, size: Some(9), ..Default::default() });
+        assert_eq!(m[1], PointMarker { idx: 1, symbol: Some("none".into()), ..Default::default() });
+        assert_eq!((m[2].symbol.as_deref(), m[2].size), (Some("circle"), Some(10)));
+        assert!(matches!(m[2].fill, Some(Fill::Solid { .. })), "{:?}", m[2].fill);
+        let line = m[2].line.clone().unwrap_or_default();
+        assert_eq!(line.width, Some(2.0));
+        assert!(matches!(line.fill, Some(Fill::Solid { .. })), "{:?}", line.fill);
+        assert_eq!(s.point_marker(4), m.get(2));
+        assert_eq!(s.point_marker(2), None);
     }
 
     /// U31: per-point labels, as python-pptx writes a custom one (`c:tx/c:rich` and `showVal`)

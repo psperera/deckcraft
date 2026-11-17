@@ -778,3 +778,53 @@ fn marker_symbols_have_their_own_shapes() {
         assert_eq!(got, want, "{symbol}: strokes on the diagonal, up the middle, across the middle");
     }
 }
+
+/// U31: a point's own marker (`c:dPt/c:marker`) takes each part it sets over its series'. It
+/// picks out one point on a line without markers; on a line with them, `none` hides one point's
+/// and a size or symbol and fill of its own change only that point's.
+#[test]
+fn a_points_own_marker_wins_over_its_series() {
+    const ORANGE: [u8; 3] = [0xED, 0x7D, 0x31];
+    const GREEN: [u8; 3] = [0x00, 0xB0, 0x50];
+    const BLUE: [u8; 3] = [0, 0, 255];
+    // The points' centres: x = 120 + 160 × (i + 0.5), y = 390 − value / 40 × 270.
+    let at = [(200, 322), (360, 225), (520, 187), (680, 288)];
+    let about = |got: u32, want: f64| (f64::from(got) - want).abs() <= 1.5;
+    let orange = r#"<c:spPr><a:solidFill><a:srgbClr val="ED7D31"/></a:solidFill><a:ln><a:noFill/></a:ln></c:spPr>"#;
+    let point = |idx: usize, marker: &str| format!(r#"<c:dPt><c:idx val="{idx}"/><c:marker>{marker}</c:marker><c:bubble3D val="0"/></c:dPt>"#);
+    // A line without markers: only the third point's own 14 pt orange circle is drawn.
+    let picked = point(2, &format!(r#"<c:symbol val="circle"/><c:size val="14"/>{orange}"#));
+    let img = image(&deck(&marker_chart(&format!(r#"<c:marker><c:symbol val="none"/></c:marker>{picked}"#))));
+    let h = height_at(&img, at[2], like(ORANGE));
+    assert!(about(h, 14.0), "the picked point: {h} px");
+    for i in [0, 1, 3] {
+        let h = height_at(&img, at[i], like(BLUE));
+        assert!(h < 4 && !like(ORANGE)(rgb(&img, at[i].0, at[i].1)), "no marker on point {i}: {h} px of line");
+    }
+    // The same with no value for the second point: the third is still the one picked out.
+    let gap = without_point(&marker_chart(&format!(r#"<c:marker><c:symbol val="none"/></c:marker>{picked}"#)), 1, STEPS[1]);
+    let img = image(&deck(&gap));
+    let (h, last) = (height_at(&img, at[2], like(ORANGE)), rgb(&img, at[3].0, at[3].1));
+    assert!(about(h, 14.0) && !like(ORANGE)(last), "past a blank point: {h} px at the third, {last:?} at the fourth");
+    // A line with 10 pt orange squares: the second point's hidden, the third's 14 pt, the
+    // fourth's a green diamond still 10 pt and with no outline, as the series has none.
+    let points = [
+        point(1, r#"<c:symbol val="none"/>"#),
+        point(2, r#"<c:size val="14"/>"#),
+        point(3, r#"<c:symbol val="diamond"/><c:spPr><a:solidFill><a:srgbClr val="00B050"/></a:solidFill></c:spPr>"#),
+    ]
+    .concat();
+    let img = image(&deck(&marker_chart(&format!(r#"<c:marker><c:symbol val="square"/><c:size val="10"/>{orange}</c:marker>{points}"#))));
+    let (w, h) = (width_at(&img, at[0], like(ORANGE)), height_at(&img, at[0], like(ORANGE)));
+    assert!(about(w, 10.0) && about(h, 10.0), "the series' square: {w} × {h} px");
+    assert!(!like(ORANGE)(rgb(&img, at[1].0, at[1].1)), "the hidden point: {:?}", rgb(&img, at[1].0, at[1].1));
+    let w = width_at(&img, (at[2].0, at[2].1 - 5), like(ORANGE));
+    assert!(about(w, 14.0), "the 14 pt square's side: {w} px");
+    // The diamond is centred on (680, 288.75), so it is 2 × (5 − 0.25) = 9.5 wide through row
+    // 288's pixel centres and 2 × (5 − 3.25) = 3.5 wide through row 285's. Its slanted edges fall
+    // 0.25 px past the outermost pixel centres, and a pixel that close to a slanted edge is under
+    // the 76 % cover this green's test needs: 8 and 2 whole pixels. A square would be 10 and 10.
+    let (w, up) = (width_at(&img, at[3], like(GREEN)), width_at(&img, (at[3].0, at[3].1 - 3), like(GREEN)));
+    assert!(about(w, 8.0) && about(up, 2.0), "the green diamond: {w} px across, {up} px near its top");
+    assert!(!like(ORANGE)(rgb(&img, at[3].0, at[3].1 + 4)), "no orange below the diamond's centre");
+}

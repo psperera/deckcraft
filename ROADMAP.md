@@ -154,6 +154,7 @@ app's JSON control channel (`deckcraft --control PORT`).
 
 | Date | What landed |
 |---|---|
+| 2026-11-17 | A single chart point's own marker (`c:dPt/c:marker`) is read, drawn and written back: its own symbol, size, fill and outline over its series', so a line without markers can pick out one point and `none` hides one point's marker, on line, scatter and radar charts (U31). |
 | 2026-11-17 | Chart markers are drawn in their own symbol's shape (`c:marker/c:symbol`): squares, diamonds, triangles, X, star, plus and bar markers instead of a circle for every symbol, on line, scatter and radar charts (U31). |
 | 2026-11-17 | Chart markers keep their own size, fill and outline (`c:marker/c:size` and `c:spPr`): a 14 pt orange marker with a green outline is drawn as one instead of as a 7 pt dot in the line's colour, on line, scatter and radar charts, and a rebuilt chart writes them back (U31). |
 | 2026-11-17 | A chart data label with text of its own (`c:dLbl` with `c:tx/c:rich`) draws that text instead of its value (a waterfall step labelled "+24.5" no longer shows "+24.4"); value, series-name and category-name fields are filled in, single labels can be shown or deleted on their own, and a rebuilt chart writes them back (U31). |

@@ -1,7 +1,9 @@
 //! Chart parts: a `c:chartSpace` with cached categories and values.
 //! An unchanged chart also keeps the embedded workbook and the other parts it points at.
 
-use deckcraft_model::chart::{AxisCrosses, Blanks, Chart, ChartType, ErrorBars, LabelPart, PlotLayout, PointLabel, Series, Trendline, TrendlineType};
+use deckcraft_model::chart::{
+    AxisCrosses, Blanks, Chart, ChartType, ErrorBars, LabelPart, PlotLayout, PointLabel, PointMarker, Series, Trendline, TrendlineType,
+};
 use deckcraft_model::style::Fill;
 
 use crate::opc::{NS_A, NS_C, NS_R};
@@ -311,6 +313,45 @@ fn point_fills(w: &mut W, s: &Series, g: Group) {
     }
 }
 
+/// A `c:symbol` worth writing: a name made of letters and digits.
+fn marker_symbol(symbol: Option<&str>) -> Option<&str> {
+    symbol.filter(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric()))
+}
+
+/// A `c:marker` in the schema's order: its symbol, its size (kept to the schema's 2 to 72), then
+/// its own fill and outline. Nothing when it would set nothing.
+fn marker(w: &mut W, symbol: Option<&str>, size: Option<u8>, fill: Option<&Fill>, line: Option<&deckcraft_model::Line>) {
+    let symbol = marker_symbol(symbol);
+    if symbol.is_none() && size.is_none() && fill.is_none() && line.is_none() {
+        return;
+    }
+    w.open0("c:marker");
+    if let Some(sym) = symbol {
+        w.val("c:symbol", sym);
+    }
+    if let Some(n) = size {
+        w.val("c:size", n.clamp(2, 72));
+    }
+    sp_pr(w, fill, line);
+    w.close("c:marker");
+}
+
+/// Most points with markers of their own written for one series.
+const MAX_POINT_MARKERS: usize = 4096;
+
+/// The points of a line, scatter or radar series with markers of their own (`c:dPt/c:marker`),
+/// after the series' marker as the schema has it. A point whose marker would set nothing is left
+/// out.
+fn point_markers(w: &mut W, s: &Series) {
+    let sets_something = |m: &&PointMarker| marker_symbol(m.symbol.as_deref()).is_some() || m.size.is_some() || m.fill.is_some() || m.line.is_some();
+    for m in s.point_markers.iter().filter(sets_something).take(MAX_POINT_MARKERS) {
+        w.open0("c:dPt");
+        w.val("c:idx", m.idx);
+        marker(w, m.symbol.as_deref(), m.size, m.fill.as_ref(), m.line.as_ref());
+        w.close("c:dPt");
+    }
+}
+
 /// Data points (categories and values counted per series) one chart group writes to its caches.
 const MAX_EXPORT_POINTS: usize = 4_000_000;
 
@@ -357,20 +398,9 @@ fn series(w: &mut W, c: &Chart, s: &Series, i: usize, kind: ChartType, g: Group)
             (_, ChartType::Scatter) => None,
             _ => Some("none"),
         };
-        let sym = sym.filter(|s| s.chars().all(|c| c.is_ascii_alphanumeric()));
         // A marker's own size, fill or outline is written even where the symbol is automatic.
-        let styled = s.marker_size.is_some() || s.marker_fill.is_some() || s.marker_line.is_some();
-        if sym.is_some() || styled {
-            w.open0("c:marker");
-            if let Some(sym) = sym {
-                w.val("c:symbol", sym);
-            }
-            if let Some(n) = s.marker_size {
-                w.val("c:size", n);
-            }
-            sp_pr(w, s.marker_fill.as_ref(), s.marker_line.as_ref());
-            w.close("c:marker");
-        }
+        marker(w, sym, s.marker_size, s.marker_fill.as_ref(), s.marker_line.as_ref());
+        point_markers(w, s);
     }
     point_fills(w, s, g);
     if s.data_labels.is_some() || !s.point_labels.is_empty() {
@@ -1536,6 +1566,51 @@ mod tests {
         let back = crate::read::chart::read_chart_xml(&super::chart_xml(&c).0).unwrap();
         let b = &back.series[0];
         assert_eq!((b.marker_size, &b.marker_fill, &b.marker_line), (None, &Some(Fill::None), &None));
+    }
+
+    /// U31: points' own markers (`c:dPt/c:marker`) round-trip in line, scatter and radar charts,
+    /// `none` included, written after the series' marker and before its labels. A bar chart's
+    /// points take none; a marker that would set nothing is left out, and a size is kept to 2–72.
+    #[test]
+    fn point_markers_round_trip() {
+        use deckcraft_model::Line;
+        use deckcraft_model::chart::PointMarker;
+        use deckcraft_model::style::Fill;
+        let orange = Fill::solid(ColorRef::rgb(Rgba::rgb(0xED, 0x7D, 0x31)));
+        let green = Line::solid(ColorRef::rgb(Rgba::rgb(0, 0xB0, 0x50)), 2.0);
+        let points = vec![
+            PointMarker { idx: 0, symbol: Some("none".into()), ..Default::default() },
+            PointMarker { idx: 2, symbol: Some("diamond".into()), size: Some(12), fill: Some(orange), line: Some(green) },
+            PointMarker { idx: 3, size: Some(9), ..Default::default() },
+        ];
+        let read = |c: &Chart| {
+            let xml = super::chart_xml(c).0;
+            (crate::read::chart::read_chart_xml(&xml).unwrap(), String::from_utf8_lossy(&xml).into_owned())
+        };
+        for kind in [ChartType::Line, ChartType::LineMarkers, ChartType::Scatter, ChartType::Radar] {
+            let mut c = Chart::sample(kind);
+            c.series[0].point_markers = points.clone();
+            c.series[0].marker_size = Some(8);
+            c.series[0].data_labels = Some(true);
+            let (back, text) = read(&c);
+            assert_eq!(back.kind, kind, "{text}");
+            assert_eq!(back.series[0].point_markers, points, "{kind:?}: {text}");
+            // The series' marker, then its points, then its labels.
+            assert!(text.contains(r#"<c:size val="8"/></c:marker><c:dPt><c:idx val="0"/>"#), "{kind:?}: {text}");
+            assert!(text.contains(r#"<c:size val="9"/></c:marker></c:dPt><c:dLbls>"#), "{kind:?}: {text}");
+        }
+        let mut c = Chart::sample(ChartType::Column);
+        c.series[0].point_markers = points;
+        let (back, text) = read(&c);
+        assert!(!text.contains("<c:marker>") && back.series[0].point_markers.is_empty(), "{text}");
+        let mut c = Chart::sample(ChartType::LineMarkers);
+        c.series[0].point_markers = vec![
+            PointMarker { idx: 1, symbol: Some("<x/>".into()), ..Default::default() },
+            PointMarker { idx: 4, size: Some(200), ..Default::default() },
+        ];
+        let (back, text) = read(&c);
+        assert!(text.contains(r#"<c:dPt><c:idx val="4"/><c:marker><c:size val="72"/></c:marker></c:dPt>"#), "{text}");
+        assert_eq!(back.series[0].point_markers, [PointMarker { idx: 4, size: Some(72), ..Default::default() }], "{text}");
     }
 
     /// A rebuilt chart keeps a deleted axis deleted, and an axis without labels without them.

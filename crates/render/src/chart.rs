@@ -206,17 +206,52 @@ fn marker_color(ctx: &Ctx, f: Option<&Fill>, auto: Rgba) -> Option<Rgba> {
 /// series' colour `col`. A marker with a fill but no outline of its own is outlined in `col` at
 /// 0.75 pt; one with neither is a dot of `col`.
 pub(crate) fn marker_paint(ctx: &Ctx, s: &deckcraft_model::chart::Series, col: Rgba) -> MarkerPaint {
-    let radius = s.marker_size.map_or(DEFAULT_MARKER_SIZE, f64::from) / 2.0;
-    let fill = marker_color(ctx, s.marker_fill.as_ref(), col);
-    let outline = match &s.marker_line {
-        None if s.marker_fill.is_none() => None,
+    paint_of_marker(ctx, (s.marker.as_deref(), s.marker_size), (s.marker_fill.as_ref(), s.marker_line.as_ref()), col)
+}
+
+/// [`marker_paint`] from a marker's parts: (symbol, size) and (fill, outline).
+fn paint_of_marker(
+    ctx: &Ctx,
+    (symbol, size): (Option<&str>, Option<u8>),
+    (own_fill, own_line): (Option<&Fill>, Option<&deckcraft_model::Line>),
+    col: Rgba,
+) -> MarkerPaint {
+    let radius = size.map_or(DEFAULT_MARKER_SIZE, f64::from) / 2.0;
+    let fill = marker_color(ctx, own_fill, col);
+    let outline = match own_line {
+        None if own_fill.is_none() => None,
         None => Some((col, MARKER_OUTLINE_WIDTH)),
         Some(l) => {
             let w = l.width.filter(|w| w.is_finite() && *w > 0.0).unwrap_or(MARKER_OUTLINE_WIDTH).clamp(0.25, 20.0);
             marker_color(ctx, l.fill.as_ref(), col).map(|c| (c, w))
         }
     };
-    MarkerPaint { symbol: MarkerSymbol::of(s.marker.as_deref()), radius, fill, outline }
+    MarkerPaint { symbol: MarkerSymbol::of(symbol), radius, fill, outline }
+}
+
+/// How point `i` of series `s` draws its marker, if at all. `series` is the series' own paint,
+/// none where the series draws no markers. A point's own marker (`c:dPt/c:marker`) takes its
+/// parts over the series': its own symbol shows the marker even where the series has none, and
+/// `none` hides it.
+pub(crate) fn point_marker_paint(
+    ctx: &Ctx,
+    s: &deckcraft_model::chart::Series,
+    i: usize,
+    col: Rgba,
+    series: Option<&MarkerPaint>,
+) -> Option<MarkerPaint> {
+    let Some(m) = s.point_marker(i) else {
+        return series.copied();
+    };
+    match m.symbol.as_deref() {
+        Some("none") => return None,
+        None if series.is_none() => return None,
+        _ => {}
+    }
+    let symbol = m.symbol.as_deref().or(s.marker.as_deref());
+    let fill = m.fill.as_ref().or(s.marker_fill.as_ref());
+    let line = m.line.as_ref().or(s.marker_line.as_ref());
+    Some(paint_of_marker(ctx, (symbol, m.size.or(s.marker_size)), (fill, line), col))
 }
 
 /// The closed polygon through `pts`, given in marker radii from the centre `q`.
@@ -1212,6 +1247,8 @@ fn draw_lines(ctx: &mut RenderContext, draw: &mut LineDrawing<'_, '_>) {
         let col = if area_kind { series_fill(rctx, c, si, Some(s)) } else { series_line(rctx, c, si, s) };
         let series_stats = s.error_bars.as_ref().map(|_| deckcraft_model::chart::SeriesStats::of(&s.values));
         let mut pts = vec![];
+        // The point each of `pts` is.
+        let mut pts_idx = vec![];
         // Where the line breaks: before these points, at points without a value (`gap`). An area
         // is drawn over them.
         let mut breaks = vec![];
@@ -1254,6 +1291,7 @@ fn draw_lines(ctx: &mut RenderContext, draw: &mut LineDrawing<'_, '_>) {
                 err_marks.push((x, to_axis(sec, lo), to_axis(sec, hi), base * 0.4, s.error_bars.as_ref().is_some_and(|e| e.end_cap)));
             }
             pts.push(Point::new(x, to_axis(sec, v)));
+            pts_idx.push(i);
         }
         if pts.is_empty() {
             continue;
@@ -1276,10 +1314,14 @@ fn draw_lines(ctx: &mut RenderContext, draw: &mut LineDrawing<'_, '_>) {
             ctx.set_stroke(kurbo::Stroke::new(lw).with_join(kurbo::Join::Round).with_caps(kurbo::Cap::Round));
             ctx.stroke_path(&p);
         }
-        if matches!(kind, ChartType::LineMarkers | ChartType::Scatter | ChartType::Bubble) {
-            let paint = marker_paint(rctx, s, col);
-            for q in &pts {
-                draw_marker(ctx, *q, &paint);
+        // The series' markers where it draws them, and the points' own (`c:dPt/c:marker`).
+        let series_markers = matches!(kind, ChartType::LineMarkers | ChartType::Scatter | ChartType::Bubble);
+        if !area_kind && (series_markers || !s.point_markers.is_empty()) {
+            let series = series_markers.then(|| marker_paint(rctx, s, col));
+            for (q, &i) in pts.iter().zip(&pts_idx) {
+                if let Some(paint) = point_marker_paint(rctx, s, i, col, series.as_ref()) {
+                    draw_marker(ctx, *q, &paint);
+                }
             }
         }
     }
@@ -1940,5 +1982,38 @@ mod tests {
         let s = deckcraft_model::chart::Series { marker: Some("triangle".into()), ..Default::default() };
         let p = deckcraft_model::defaults::new_presentation(None);
         assert_eq!(marker_paint(&Ctx::for_master(&p, &p.masters[0]), &s, Rgba::rgb(0, 0, 0)).symbol, M::Triangle);
+    }
+
+    /// U31: a point's own marker (`c:dPt/c:marker`) takes each part it sets over the series';
+    /// its own symbol shows it on a series without markers, and `none` hides it.
+    #[test]
+    fn a_points_own_marker_wins_over_its_series() {
+        use deckcraft_model::chart::{PointMarker, Series};
+        let p = deckcraft_model::defaults::new_presentation(None);
+        let ctx = Ctx::for_master(&p, &p.masters[0]);
+        let (col, orange) = (Rgba::rgb(0, 0, 255), Rgba::rgb(0xED, 0x7D, 0x31));
+        let s = Series {
+            marker: Some("square".into()),
+            marker_size: Some(10),
+            marker_line: Some(deckcraft_model::Line::none()),
+            point_markers: vec![
+                PointMarker { idx: 1, symbol: Some("none".into()), ..Default::default() },
+                PointMarker { idx: 2, size: Some(16), ..Default::default() },
+                PointMarker { idx: 3, symbol: Some("diamond".into()), fill: Some(Fill::solid(ColorRef::rgb(orange))), ..Default::default() },
+            ],
+            ..Default::default()
+        };
+        let series = marker_paint(&ctx, &s, col);
+        let at = |i: usize, series: Option<&MarkerPaint>| point_marker_paint(&ctx, &s, i, col, series);
+        // With the series' markers drawn.
+        assert_eq!(at(0, Some(&series)), Some(series));
+        assert_eq!(at(1, Some(&series)), None);
+        assert_eq!(at(2, Some(&series)), Some(MarkerPaint { radius: 8.0, ..series }));
+        // Its own symbol and fill, the series' size, and the series' lack of an outline.
+        let own = MarkerPaint { symbol: MarkerSymbol::Diamond, radius: 5.0, fill: Some(orange), outline: None };
+        assert_eq!(at(3, Some(&series)), Some(own));
+        // On a series without markers only a point with a symbol of its own shows one.
+        assert_eq!([0, 1, 2].map(|i| at(i, None)), [None, None, None]);
+        assert_eq!(at(3, None), Some(own));
     }
 }
