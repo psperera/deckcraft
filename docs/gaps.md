@@ -186,6 +186,8 @@ Detail in [file-format-parity.md](file-format-parity.md).
   A bar chart's category labels size their band and wrap beyond 40 % of the chart; a column
   chart's still split onto two lines at most.
   `c:dispBlanksAs` is honoured for lines; area and radar charts don't break at a missing point.
+  Per-point data labels keep their own text and visibility; their own position, number format
+  and style are not kept, and line and area charts draw no data labels.
   The primary axis survives chart rebuilds. A combo chart's secondary value axis is read
   (`y2_*`, `Series.secondary_axis`) but is not written back when the chart is rebuilt.
   An unchanged chart's embedded workbook now survives save (#335); editing the chart still

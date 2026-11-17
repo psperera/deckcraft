@@ -245,6 +245,39 @@ pub struct Series {
     /// `c:errBars` on the values (y bars; a bar chart's run along its value axis).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error_bars: Option<ErrorBars>,
+    /// Data labels set apart from the series' own (`c:dLbls/c:dLbl`), sorted by point, one per
+    /// point.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub point_labels: Vec<PointLabel>,
+}
+
+/// One point's data label where it differs from its series' (`c:dLbl`): shown or hidden on its
+/// own, or with text of its own.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct PointLabel {
+    /// The point (`c:idx`).
+    pub idx: usize,
+    /// Shown or hidden whatever the series says (`c:delete`, `c:showVal`); `None` follows it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub show: Option<bool>,
+    /// Its own text (`c:tx/c:rich`), drawn instead of the value; empty when it has none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub text: Vec<LabelPart>,
+}
+
+/// A piece of a data label's own text: words, or a field PowerPoint fills in (`a:fld`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum LabelPart {
+    /// Words, a line break as `\n`.
+    Text(String),
+    /// The point's value in the label's number format (`a:fld type="VALUE"`).
+    Value,
+    /// The series' name (`SERIESNAME`).
+    SeriesName,
+    /// The point's category (`CATEGORYNAME`).
+    CategoryName,
 }
 
 /// Error bars (`c:errBars`): how far each point's bar reaches below and above it.
@@ -912,6 +945,37 @@ impl Chart {
         crate::numfmt::format(code.map_or("General", String::as_str), v, self.lang.as_deref())
     }
 
+    /// Point `i`'s data label in series `s`, or `None` when it has none: the point's own label
+    /// (`c:dLbl`: its text, or shown or hidden on its own) over the series' value label. A point
+    /// without a value has no label.
+    pub fn point_label(&self, s: &Series, i: usize) -> Option<String> {
+        let v = s.values.get(i).copied().flatten()?;
+        self.point_label_of(s, i, v)
+    }
+
+    /// [`Chart::point_label`] with `v` as the value it shows (a pie slice shows a negative value
+    /// as zero).
+    pub fn point_label_of(&self, s: &Series, i: usize, v: f64) -> Option<String> {
+        let own = s.point_labels.binary_search_by_key(&i, |l| l.idx).ok().and_then(|k| s.point_labels.get(k));
+        if !own.and_then(|l| l.show).unwrap_or_else(|| self.series_data_labels(s)) {
+            return None;
+        }
+        match own.filter(|l| !l.text.is_empty()) {
+            Some(l) => Some(
+                l.text
+                    .iter()
+                    .map(|p| match p {
+                        LabelPart::Text(t) => t.clone(),
+                        LabelPart::Value => self.data_label(s, v),
+                        LabelPart::SeriesName => s.name.clone(),
+                        LabelPart::CategoryName => self.categories.get(i).cloned().unwrap_or_default(),
+                    })
+                    .collect(),
+            ),
+            None => Some(self.data_label(s, v)),
+        }
+    }
+
     /// Does series `s` show its data labels? The series' own `c:dLbls/c:showVal` wins — an
     /// explicit `false` hides them even when the chart-wide setting is on (#868).
     pub fn series_data_labels(&self, s: &Series) -> bool {
@@ -1201,6 +1265,45 @@ mod tests {
             let (a, b, s) = axis_scale(lo, hi, None, None, Some(0.0), 0, true);
             assert!(a.is_finite() && b.is_finite() && s > 0.0 && b > a, "{lo} {hi}: {a} {b} {s}");
         }
+    }
+
+    /// U31: a point's own label wins over its series': custom text (with fields filled in) in
+    /// place of the value, or shown or hidden on its own. A point without a value has none.
+    #[test]
+    fn a_points_own_label_wins_over_its_series() {
+        let s = Series {
+            name: "Increase".into(),
+            values: vec![Some(24.44), Some(3.0), Some(5.0), None, Some(7.0)],
+            number_format: Some("+#,##0.0".into()),
+            point_labels: vec![
+                PointLabel { idx: 0, show: Some(true), text: vec![LabelPart::Text("+24.5".into())] },
+                PointLabel { idx: 1, show: Some(false), text: vec![] },
+                PointLabel {
+                    idx: 2,
+                    show: None,
+                    text: vec![
+                        LabelPart::CategoryName,
+                        LabelPart::Text(": ".into()),
+                        LabelPart::Value,
+                        LabelPart::Text(" ".into()),
+                        LabelPart::SeriesName,
+                    ],
+                },
+                PointLabel { idx: 3, show: Some(true), text: vec![LabelPart::Text("n/a".into())] },
+            ],
+            ..Default::default()
+        };
+        let mut c = Chart { categories: vec!["A".into(), "B".into(), "C".into()], data_labels: true, ..Default::default() };
+        c.series = vec![s];
+        let s = &c.series[0];
+        let labels: Vec<Option<String>> = (0..6).map(|i| c.point_label(s, i)).collect();
+        assert_eq!(labels, [Some("+24.5".into()), None, Some("C: +5.0 Increase".into()), None, Some("+7.0".into()), None]);
+        // With the series' labels off, only a label shown on its own is drawn; text that follows
+        // the series is not.
+        c.data_labels = false;
+        let s = &c.series[0];
+        let labels: Vec<Option<String>> = (0..5).map(|i| c.point_label(s, i)).collect();
+        assert_eq!(labels, [Some("+24.5".into()), None, None, None, None]);
     }
 
     /// U30: `c:min`/`c:max` are the axis' ends exactly, not rounded out to a tick.

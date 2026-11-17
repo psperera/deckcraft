@@ -1,8 +1,9 @@
 //! U30: native charts drawn with PowerPoint's plot geometry. A manual inner plot layout puts the
 //! plot exactly where the file says, fixed axis ends are kept exactly, and deleted axes draw
 //! nothing, also after the chart is edited. U31: a bar chart's category labels fit beside its
-//! plot, and points without a value are gaps rather than zeros. Each chart is XML written here,
-//! imported and rendered; no Office file is used.
+//! plot, points without a value are gaps rather than zeros, and a data label's own text is drawn
+//! instead of its value. Each chart is XML written here, imported and rendered; no Office file
+//! is used.
 
 use std::io::{Cursor, Read, Write};
 use std::sync::Arc;
@@ -598,4 +599,68 @@ fn a_line_breaks_spans_or_drops_to_zero_at_a_missing_point() {
     let img = image(&deck(&line_chart(Some("zero"))));
     assert!(red_line(&img, at(slot5(1), y(0.0) - 4.0)), "zero: down to the zero line");
     assert!(red_line(&img, at((slot5(0) + slot5(1)) / 2.0, (y(57.0) + y(0.0)) / 2.0)), "zero: from 57");
+}
+
+/// The series' labels (`show` their values or not) in the strategy kit's waterfall format, with
+/// `own` per-point labels (`c:dLbl`) before them.
+fn labels_with(xml: &str, show: bool, own: &str) -> String {
+    let show = u8::from(show);
+    let labels = format!(
+        r##"<c:dLbls>{own}<c:numFmt formatCode="+#,##0.0;-#,##0.0;;" sourceLinked="0"/><c:showLegendKey val="0"/><c:showVal val="{show}"/><c:showCatName val="0"/><c:showSerName val="0"/><c:showPercent val="0"/><c:showBubbleSize val="0"/></c:dLbls>"##
+    );
+    let out = xml.replacen(r#"<c:invertIfNegative val="0"/><c:cat>"#, &format!(r#"<c:invertIfNegative val="0"/>{labels}<c:cat>"#), 1);
+    assert_ne!(out, xml);
+    out
+}
+
+/// A point's own label as python-pptx writes `data_label.text_frame.text = text`.
+fn own_text(idx: usize, text: &str) -> String {
+    format!(
+        r#"<c:dLbl><c:idx val="{idx}"/><c:tx><c:rich><a:bodyPr/><a:lstStyle/><a:p><a:r><a:rPr lang="en-US"/><a:t>{text}</a:t></a:r></a:p></c:rich></c:tx><c:showLegendKey val="0"/><c:showVal val="1"/><c:showCatName val="0"/><c:showSerName val="0"/><c:showPercent val="0"/><c:showBubbleSize val="0"/></c:dLbl>"#
+    )
+}
+
+/// A waterfall step of 24.44 that the kit labels "+24.5" (so the steps add up to the totals as
+/// shown) to 0.1 on a 0..40 axis that is deleted.
+const STEPS: [f64; 4] = [10.0, 24.44, 30.0, 15.0];
+const ZERO_TO_40: Axes<'static> = Axes { scaling: r#"<c:max val="40"/><c:min val="0"/>"#, deleted: true, ..SHOWN };
+
+/// The pixels in the box (inclusive).
+fn crop(img: &Image, (x0, y0, x1, y1): (u32, u32, u32, u32)) -> Vec<[u8; 3]> {
+    (y0..=y1).flat_map(|y| (x0..=x1).map(move |x| (x, y))).map(|(x, y)| rgb(img, x, y)).collect()
+}
+
+/// A data label with text of its own (`c:dLbl` with `c:tx/c:rich`) draws that text, not its
+/// value: the kit's "+24.5" on a step of 24.44 is not drawn "+24.4".
+#[test]
+fn a_data_labels_own_text_is_drawn_instead_of_its_value() {
+    let chart = |own: &str| deck(&labels_with(&column_chart(&STEPS, LAYOUT, ZERO_TO_40), true, own));
+    let p = chart(&own_text(1, "+24.5"));
+    let c = chart_of(&p);
+    assert_eq!(c.point_label(&c.series[0], 1).as_deref(), Some("+24.5"));
+    assert_eq!(c.point_label(&c.series[0], 0).as_deref(), Some("+10.0"));
+    // Around the second column and above it, where its label goes.
+    let (l, r) = column_x(1, 4, 60.0);
+    let around = (l as u32 - 20, PLOT.1 as u32, r as u32 + 20, PLOT.3 as u32);
+    let custom = crop(&image(&p), around);
+    let value = crop(&image(&chart("")), around);
+    let same_text = crop(&image(&chart(&own_text(1, "+24.4"))), around);
+    assert!(text(&image(&p), around), "the label is drawn");
+    assert_eq!(same_text, value, "own text equal to the value's draws exactly what the value label draws");
+    assert_ne!(custom, value, "\"+24.5\" is drawn, not the value's \"+24.4\"");
+}
+
+/// A point's own label shows even when its series' labels are off, and a deleted one hides
+/// though they are on.
+#[test]
+fn a_points_own_label_shows_or_hides_on_its_own() {
+    let above = |i: usize| {
+        let (l, r) = column_x(i, 4, 60.0);
+        (l as u32 - 10, PLOT.1 as u32, r as u32 + 10, PLOT.3 as u32)
+    };
+    let img = image(&deck(&labels_with(&column_chart(&STEPS, LAYOUT, ZERO_TO_40), false, &own_text(1, "+24.5"))));
+    assert!(text(&img, above(1)) && !text(&img, above(0)) && !text(&img, above(2)), "only the point's own label");
+    let deleted = r#"<c:dLbl><c:idx val="0"/><c:delete val="1"/></c:dLbl>"#;
+    let img = image(&deck(&labels_with(&column_chart(&STEPS, LAYOUT, ZERO_TO_40), true, deleted)));
+    assert!(!text(&img, above(0)) && text(&img, above(1)) && text(&img, above(2)), "all but the deleted label");
 }

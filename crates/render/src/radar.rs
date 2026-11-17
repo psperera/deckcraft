@@ -123,19 +123,17 @@ pub fn draw(ctx: &mut RenderContext, rctx: &Ctx, c: &Chart, m: Affine, area: Rec
                 }
             }
         }
-        if c.series_data_labels(s) {
-            for (i, q) in pts.iter().enumerate() {
-                if let Some(v) = s.values.get(i).copied().flatten() {
-                    let t = c.data_label(s, v);
-                    label(
-                        ctx,
-                        rctx,
-                        m,
-                        &t,
-                        Rect::new(q.x - 40.0, q.y - base * 1.4, q.x + 40.0, q.y - base * 0.2),
-                        crate::chart::LabelStyle { size: base * 0.9, align: Align::Center, anchor: Anchor::Bottom, col: text_col, bold: false },
-                    );
-                }
+        // Each point's label: its own (custom text, or shown or hidden on its own) over the series'.
+        for (i, q) in pts.iter().enumerate() {
+            if let Some(t) = c.point_label(s, i) {
+                label(
+                    ctx,
+                    rctx,
+                    m,
+                    &t,
+                    Rect::new(q.x - 40.0, q.y - base * 1.4, q.x + 40.0, q.y - base * 0.2),
+                    crate::chart::LabelStyle { size: base * 0.9, align: Align::Center, anchor: Anchor::Bottom, col: text_col, bold: false },
+                );
             }
         }
     }

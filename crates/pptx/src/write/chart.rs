@@ -1,7 +1,7 @@
 //! Chart parts: a `c:chartSpace` with cached categories and values.
 //! An unchanged chart also keeps the embedded workbook and the other parts it points at.
 
-use deckcraft_model::chart::{AxisCrosses, Blanks, Chart, ChartType, ErrorBars, PlotLayout, Series, Trendline, TrendlineType};
+use deckcraft_model::chart::{AxisCrosses, Blanks, Chart, ChartType, ErrorBars, LabelPart, PlotLayout, PointLabel, Series, Trendline, TrendlineType};
 use deckcraft_model::style::Fill;
 
 use crate::opc::{NS_A, NS_C, NS_R};
@@ -364,8 +364,8 @@ fn series(w: &mut W, c: &Chart, s: &Series, i: usize, kind: ChartType, g: Group)
         }
     }
     point_fills(w, s, g);
-    if let Some(d) = s.data_labels {
-        data_labels(w, c, d);
+    if s.data_labels.is_some() || !s.point_labels.is_empty() {
+        data_labels(w, c, s.data_labels.unwrap_or_else(|| c.series_data_labels(s)), (i, &s.point_labels));
     }
     // After labels, before the category and value caches (ECMA-376 series content order).
     if matches!(g, Group::Bar | Group::Line | Group::Area | Group::Scatter) {
@@ -454,8 +454,16 @@ fn trendline(w: &mut W, t: &Trendline) {
     w.close("c:trendline");
 }
 
-fn data_labels(w: &mut W, c: &Chart, show: bool) {
+/// Most `c:dLbl` written for one series.
+const MAX_POINT_LABELS: usize = 4096;
+
+/// `c:dLbls`: the points' own labels (`points`: the series' index and its labels), then the
+/// labels' text style and whether they show their values.
+fn data_labels(w: &mut W, c: &Chart, show: bool, (series, points): (usize, &[PointLabel])) {
     w.open0("c:dLbls");
+    for l in points.iter().take(MAX_POINT_LABELS) {
+        point_label(w, l, show, series);
+    }
     tx_pr(w, c);
     for (n, v) in [
         ("c:showLegendKey", false),
@@ -468,6 +476,65 @@ fn data_labels(w: &mut W, c: &Chart, show: bool) {
         w.val(n, if v { 1 } else { 0 });
     }
     w.close("c:dLbls");
+}
+
+/// One point's own label (`c:dLbl`) in the schema's order: its index, then `c:delete` for a hidden
+/// one, else its own text and what it shows. `series_shows`: whether the series' labels show.
+fn point_label(w: &mut W, l: &PointLabel, series_shows: bool, series: usize) {
+    w.open0("c:dLbl");
+    w.val("c:idx", l.idx);
+    if !l.show.unwrap_or(series_shows) {
+        w.val("c:delete", 1);
+        w.close("c:dLbl");
+        return;
+    }
+    if !l.text.is_empty() {
+        w.open0("c:tx");
+        w.open0("c:rich");
+        w.empty0("a:bodyPr");
+        w.empty0("a:lstStyle");
+        w.open0("a:p");
+        for (k, part) in l.text.iter().enumerate() {
+            let (kind, shown) = match part {
+                LabelPart::Text(t) => {
+                    for (n, line) in t.split('\n').enumerate() {
+                        if n > 0 {
+                            w.close("a:p");
+                            w.open0("a:p");
+                        }
+                        if !line.is_empty() {
+                            w.open0("a:r");
+                            w.elt("a:t", line);
+                            w.close("a:r");
+                        }
+                    }
+                    continue;
+                }
+                LabelPart::Value => ("VALUE", "[VALUE]"),
+                LabelPart::SeriesName => ("SERIESNAME", "[SERIES NAME]"),
+                LabelPart::CategoryName => ("CATEGORYNAME", "[CATEGORY NAME]"),
+            };
+            // `a:fld` needs a GUID of its own: one made from the series, the point and the piece.
+            let id = format!("{{{:08X}-{:04X}-4000-8000-{:012X}}}", l.idx & 0xFFFF_FFFF, series & 0xFFFF, k & 0xFFFF_FFFF_FFFF);
+            w.open("a:fld", A::new().a("id", id).a("type", kind));
+            w.elt("a:t", shown);
+            w.close("a:fld");
+        }
+        w.close("a:p");
+        w.close("c:rich");
+        w.close("c:tx");
+    }
+    for (n, v) in [
+        ("c:showLegendKey", false),
+        ("c:showVal", true),
+        ("c:showCatName", false),
+        ("c:showSerName", false),
+        ("c:showPercent", false),
+        ("c:showBubbleSize", false),
+    ] {
+        w.val(n, u8::from(v));
+    }
+    w.close("c:dLbl");
 }
 
 /// Where the axis being written crosses the value axis: `c:crossesAt`, else `c:crosses`.
@@ -644,7 +711,7 @@ fn plot_group(w: &mut W, c: &Chart, kind: ChartType, list: &[(usize, &Series)]) 
         series(w, c, s, *i, kind, g);
     }
     if c.data_labels {
-        data_labels(w, c, true);
+        data_labels(w, c, true, (0, &[]));
     }
     match g {
         Group::Bar => {
@@ -1393,6 +1460,34 @@ mod tests {
                 let edited = text.replace(&format!(r#"<c:dispBlanksAs val="{val}"/>"#), &other);
                 assert_eq!(crate::read::chart::read_chart_xml(edited.as_bytes()).unwrap().blanks, Blanks::Gap, "{other}");
             }
+        }
+    }
+
+    /// A rebuilt chart writes each point's own label back: hidden, or with its own text and
+    /// fields, and reads back the same.
+    #[test]
+    fn point_labels_round_trip() {
+        use deckcraft_model::chart::{LabelPart, PointLabel};
+        let labels = vec![
+            PointLabel { idx: 0, show: Some(true), text: vec![LabelPart::Text("+24.5 & <more>".into())] },
+            PointLabel { idx: 1, show: Some(false), text: vec![] },
+            PointLabel {
+                idx: 2,
+                show: Some(true),
+                text: vec![LabelPart::CategoryName, LabelPart::Text(":\n".into()), LabelPart::Value, LabelPart::SeriesName],
+            },
+        ];
+        for kind in [ChartType::Column, ChartType::Bar, ChartType::Pie, ChartType::Line] {
+            let mut c = Chart::sample(kind);
+            c.series[0].point_labels = labels.clone();
+            let xml = super::chart_xml(&c).0;
+            let text = String::from_utf8_lossy(&xml).into_owned();
+            // The labels come first in `c:dLbls`, a field with a GUID of its own.
+            assert!(text.contains(r#"<c:dLbls><c:dLbl><c:idx val="0"/><c:tx><c:rich>"#), "{kind:?}: {text}");
+            assert!(text.contains(r#"<a:fld id="{00000002-0000-4000-8000-000000000002}" type="VALUE"><a:t>[VALUE]</a:t></a:fld>"#), "{text}");
+            let back = crate::read::chart::read_chart_xml(&xml).unwrap();
+            assert_eq!(back.series[0].point_labels, labels, "{kind:?}");
+            assert_eq!(back.point_label(&back.series[0], 0).as_deref(), Some("+24.5 & <more>"));
         }
     }
 

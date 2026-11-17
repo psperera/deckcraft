@@ -1284,10 +1284,8 @@ fn draw_bars(ctx: &mut RenderContext, draw: &BarDrawing<'_, '_>) -> Vec<(f64, f6
 }
 
 fn bar_data_label(c: &Chart, s: &deckcraft_model::chart::Series, i: usize) -> Option<String> {
-    if !c.series_data_labels(s) {
-        return None;
-    }
-    s.values.get(i).copied().flatten().map(|value| c.data_label(s, value))
+    // The point's own label (custom text, or shown or hidden on its own) over the series'.
+    c.point_label(s, i)
 }
 
 #[cfg(test)]
@@ -1394,10 +1392,7 @@ fn draw_pie(ctx: &mut RenderContext, rctx: &Ctx, c: &Chart, m: Affine, area: Rec
 /// A pie slice's data label, its value as drawn (a negative one as zero). A point without a value
 /// has no slice and no label, rather than a "0".
 fn pie_data_label(c: &Chart, s: &deckcraft_model::chart::Series, i: usize) -> Option<String> {
-    if !c.series_data_labels(s) {
-        return None;
-    }
-    s.values.get(i).copied().flatten().map(|v| c.data_label(s, v.max(0.0)))
+    s.values.get(i).copied().flatten().and_then(|v| c.point_label_of(s, i, v.max(0.0)))
 }
 
 /// `v` kept within `lo..=hi` without `f64::clamp`'s panic when `lo > hi` (a chart smaller than

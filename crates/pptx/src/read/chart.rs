@@ -1,6 +1,6 @@
 //! Chart parts (`c:chartSpace`) → [`Chart`]. The original XML is kept in `Chart.raw`.
 
-use deckcraft_model::chart::{AxisCrosses, Blanks, Chart, ChartType, ErrorBars, PlotLayout, Series, Trendline, TrendlineType};
+use deckcraft_model::chart::{AxisCrosses, Blanks, Chart, ChartType, ErrorBars, LabelPart, PlotLayout, PointLabel, Series, Trendline, TrendlineType};
 use deckcraft_model::style::Fill;
 
 use crate::xml::El;
@@ -367,6 +367,96 @@ fn label_number_format(s: &El, g: &El) -> Option<String> {
     label_fmt(s.child("dLbls")).or_else(|| label_fmt(g.child("dLbls"))).or(source).filter(|f| !f.is_empty())
 }
 
+/// Most `c:dLbl` one series keeps.
+const MAX_POINT_LABELS: usize = 4096;
+/// Most characters, and pieces, one label's own text keeps.
+const MAX_LABEL_CHARS: usize = 1000;
+const MAX_LABEL_PARTS: usize = 64;
+
+/// A series' labels set apart from its own (`c:dLbls/c:dLbl`), sorted by point; the first for a
+/// point wins.
+fn point_labels(s: &El) -> Vec<PointLabel> {
+    let Some(d) = s.child("dLbls") else { return vec![] };
+    let mut out: Vec<PointLabel> = d.children_named("dLbl").take(MAX_POINT_LABELS).filter_map(point_label).collect();
+    // A stable sort, so the file's first label for a point is the one kept.
+    out.sort_by_key(|l| l.idx);
+    out.dedup_by_key(|l| l.idx);
+    out
+}
+
+/// One `c:dLbl`: deleted (a bare `<c:delete/>` too), or shown with its own text, or shown or
+/// hidden by its own `c:showVal`. Text of its own shows even when `c:showVal` is off. `None` for
+/// a label that changes nothing DeckCraft draws.
+fn point_label(d: &El) -> Option<PointLabel> {
+    let idx = d.child("idx").and_then(|i| i.u32("val"))? as usize;
+    if d.child("delete").is_some_and(|e| e.bool("val") != Some(false)) {
+        return Some(PointLabel { idx, show: Some(false), text: vec![] });
+    }
+    let text = d.child("tx").map(label_text).unwrap_or_default();
+    let has_text = !text.is_empty();
+    let show = match d.child("showVal").map(|v| v.bool("val").unwrap_or(true)) {
+        Some(v) => Some(v || has_text),
+        None => has_text.then_some(true),
+    };
+    show.map(|show| PointLabel { idx, show: Some(show), text })
+}
+
+/// A label's own text (`c:tx`): its rich text's runs, breaks and fields, a line for each
+/// paragraph, or a cell reference's cached text. A field PowerPoint fills in from the chart
+/// (value, series name, category name) stays a field; any other shows its cached text.
+fn label_text(tx: &El) -> Vec<LabelPart> {
+    let mut parts: Vec<LabelPart> = vec![];
+    let mut chars = 0usize;
+    let mut push = |parts: &mut Vec<LabelPart>, t: &str| {
+        let room = MAX_LABEL_CHARS.saturating_sub(chars);
+        let t: String = t.chars().take(room).collect();
+        chars += t.chars().count();
+        if t.is_empty() {
+            return;
+        }
+        if let Some(LabelPart::Text(prev)) = parts.last_mut() {
+            prev.push_str(&t);
+        } else if parts.len() < MAX_LABEL_PARTS {
+            parts.push(LabelPart::Text(t));
+        }
+    };
+    let Some(rich) = tx.child("rich") else {
+        if let Some(v) = tx.find("v") {
+            push(&mut parts, &v.text());
+        }
+        return parts;
+    };
+    for (n, p) in rich.children_named("p").enumerate() {
+        if n > 0 {
+            push(&mut parts, "\n");
+        }
+        for e in p.elements() {
+            let field = match (e.local(), e.attr("type")) {
+                ("r", _) => None,
+                ("br", _) => {
+                    push(&mut parts, "\n");
+                    continue;
+                }
+                ("fld", Some("VALUE")) => Some(LabelPart::Value),
+                ("fld", Some("SERIESNAME")) => Some(LabelPart::SeriesName),
+                ("fld", Some("CATEGORYNAME")) => Some(LabelPart::CategoryName),
+                ("fld", _) => None,
+                _ => continue,
+            };
+            match field {
+                Some(f) if parts.len() < MAX_LABEL_PARTS => parts.push(f),
+                Some(_) => {}
+                None => push(&mut parts, &e.child("t").map(|t| t.text()).unwrap_or_default()),
+            }
+        }
+    }
+    // Paragraph breaks alone are no text.
+    if parts.iter().all(|p| matches!(p, LabelPart::Text(t) if t.trim().is_empty())) {
+        parts.clear();
+    }
+    parts
+}
+
 /// Error bars on the values: a scatter chart's y bars, any other chart's only ones.
 fn read_error_bars(s: &El, kind: ChartType, budget: &mut usize) -> Option<ErrorBars> {
     let e = s
@@ -413,6 +503,7 @@ fn read_series(s: &El, g: &El, group: (ChartType, bool, Option<bool>), categorie
         }
     }
     ser.number_format = label_number_format(s, g);
+    ser.point_labels = point_labels(s);
     for dp in s.children_named("dPt") {
         if let (Some(i), Some(f)) = (dp.child("idx").and_then(|i| i.u32("val")), simple_fill(dp.child("spPr"))) {
             ser.point_fills.push((i as usize, f));
@@ -1154,6 +1245,56 @@ mod tests {
 
     const NS_C: &str = "http://schemas.openxmlformats.org/drawingml/2006/chart";
     const NS_A: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
+
+    /// U31: per-point labels, as python-pptx writes a custom one (`c:tx/c:rich` and `showVal`)
+    /// and as PowerPoint writes fields, deleted labels and cell-reference text.
+    #[test]
+    fn point_labels_are_read() {
+        use deckcraft_model::chart::{LabelPart, PointLabel};
+        let shows = r#"<c:showLegendKey val="0"/><c:showVal val="1"/><c:showCatName val="0"/><c:showSerName val="0"/><c:showPercent val="0"/><c:showBubbleSize val="0"/>"#;
+        let rich = |body: &str| format!(r#"<c:tx><c:rich><a:bodyPr/><a:lstStyle/>{body}</c:rich></c:tx>"#);
+        let labels = [
+            // python-pptx's `text_frame.text = "+24.5"`.
+            format!(r#"<c:dLbl><c:idx val="3"/>{}<c:dLblPos val="inEnd"/>{shows}</c:dLbl>"#, rich(r#"<a:p><a:r><a:rPr lang="en-GB" sz="1000"/><a:t>+24.5</a:t></a:r></a:p>"#)),
+            r#"<c:dLbl><c:idx val="1"/><c:delete val="1"/></c:dLbl>"#.to_string(),
+            r#"<c:dLbl><c:idx val="2"/><c:delete/></c:dLbl>"#.to_string(),
+            // Fields over two paragraphs; an unknown field keeps its cached text.
+            format!(
+                r#"<c:dLbl><c:idx val="0"/>{}{shows}</c:dLbl>"#,
+                rich(
+                    r#"<a:p><a:fld id="{A}" type="CATEGORYNAME"><a:t>[CATEGORY NAME]</a:t></a:fld><a:r><a:t>: </a:t></a:r><a:fld id="{B}" type="VALUE"><a:t>[VALUE]</a:t></a:fld></a:p><a:p><a:fld id="{C}" type="SERIESNAME"><a:t>[SERIES NAME]</a:t></a:fld><a:r><a:t> </a:t></a:r><a:fld id="{D}" type="CELLREF"><a:t>B4</a:t></a:fld></a:p>"#
+                )
+            ),
+            // A label shown on its own, and the same point again (the first wins).
+            r#"<c:dLbl><c:idx val="5"/><c:showVal val="1"/></c:dLbl>"#.to_string(),
+            r#"<c:dLbl><c:idx val="5"/><c:showVal val="0"/></c:dLbl>"#.to_string(),
+            // A cell's text; a label that changes nothing is dropped.
+            r#"<c:dLbl><c:idx val="6"/><c:tx><c:strRef><c:f>Sheet1!$D$2</c:f><c:strCache><c:ptCount val="1"/><c:pt idx="0"><c:v>Plan</c:v></c:pt></c:strCache></c:strRef></c:tx></c:dLbl>"#.to_string(),
+            r#"<c:dLbl><c:idx val="7"/><c:dLblPos val="ctr"/></c:dLbl>"#.to_string(),
+        ]
+        .concat();
+        let val = r#"<c:val><c:numLit><c:ptCount val="8"/><c:pt idx="0"><c:v>1</c:v></c:pt></c:numLit></c:val>"#;
+        let xml = format!(
+            r#"<c:chartSpace xmlns:c="{NS_C}" xmlns:a="{NS_A}"><c:chart><c:plotArea><c:barChart><c:barDir val="col"/><c:ser><c:idx val="0"/><c:dLbls>{labels}<c:showVal val="1"/></c:dLbls>{val}</c:ser></c:barChart></c:plotArea></c:chart></c:chartSpace>"#
+        );
+        let c = read_chart_xml(xml.as_bytes()).unwrap();
+        let text = |t: &str| LabelPart::Text(t.into());
+        assert_eq!(
+            c.series[0].point_labels,
+            [
+                PointLabel {
+                    idx: 0,
+                    show: Some(true),
+                    text: vec![LabelPart::CategoryName, text(": "), LabelPart::Value, text("\n"), LabelPart::SeriesName, text(" B4")],
+                },
+                PointLabel { idx: 1, show: Some(false), text: vec![] },
+                PointLabel { idx: 2, show: Some(false), text: vec![] },
+                PointLabel { idx: 3, show: Some(true), text: vec![text("+24.5")] },
+                PointLabel { idx: 5, show: Some(true), text: vec![] },
+                PointLabel { idx: 6, show: Some(true), text: vec![text("Plan")] },
+            ]
+        );
+    }
 
     fn chart(auto_deleted: &str, title: &str, series: usize) -> Chart {
         let val = r#"<c:val><c:numLit><c:ptCount val="1"/><c:pt idx="0"><c:v>1</c:v></c:pt></c:numLit></c:val>"#;
