@@ -597,14 +597,18 @@ fn a_reversed_value_axis_grows_bars_leftwards_and_keeps_unfilled_points_empty() 
     assert!(painted_box(&img, GREEN, 0..960).is_none(), "the noFill point stays empty");
     let r = painted_box(&img, RED, 0..960).expect("first segment");
     let b = painted_box(&img, BLUE, 0..960).expect("last segment");
-    // The plot runs from area.x0 (0.04 × 960) to area.x1 less the category labels' gutter
-    // (0.96 × 960 − 4.5 × 18), which has moved to the right; zero is at its right-hand end.
-    let (left, right) = (38.4, 921.6 - 81.0);
+    // The plot runs from area.x0 (0.04 × 960) to area.x1 (0.96 × 960) less the category labels'
+    // gutter, which has moved to the right; zero is at its right-hand end. The gutter fits the
+    // label "A" at 18 pt: wider than the 0.5 em margin, narrower than the old fixed 4.5 em.
+    let left = 38.4;
+    let right = (r.2 + 1) as f64;
+    let gutter = 921.6 - right;
+    assert!(gutter > 9.0 && gutter < 81.0, "the first segment starts at zero, on the right, past a fitted gutter: {gutter}");
+    // `right` is read from whole pixels, so positions measured from it get half a pixel more room.
     let at = |v: f64| right - v / 20.0 * (right - left);
-    assert!(((r.2 + 1) as f64 - at(0.0)).abs() <= 1.5, "the first segment starts at zero, on the right: {}", r.2 + 1);
-    assert!((r.0 as f64 - at(7.0)).abs() <= 1.5, "and ends at 7: {}", r.0);
-    assert!(((b.2 + 1) as f64 - at(11.0)).abs() <= 1.5, "the last floats past the gap, from 11: {}", b.2 + 1);
-    assert!((b.0 as f64 - at(14.0)).abs() <= 1.5, "to 14: {}", b.0);
+    assert!((r.0 as f64 - at(7.0)).abs() <= 2.0, "and ends at 7: {}", r.0);
+    assert!(((b.2 + 1) as f64 - at(11.0)).abs() <= 2.0, "the last floats past the gap, from 11: {}", b.2 + 1);
+    assert!((b.0 as f64 - at(14.0)).abs() <= 2.0, "to 14: {}", b.0);
     let mid = (r.1 + r.3) / 2;
     assert!(
         (b.2 + 2..r.0 - 1).all(|x| ![RED, GREEN, BLUE].contains(&img.pixel(x, mid)[..3].try_into().unwrap_or([0; 3]))),
@@ -615,7 +619,7 @@ fn a_reversed_value_axis_grows_bars_leftwards_and_keeps_unfilled_points_empty() 
     let img = stacked(false);
     let (r, b) = (painted_box(&img, RED, 0..960).unwrap(), painted_box(&img, BLUE, 0..960).unwrap());
     assert!(r.2 < b.0, "red {r:?} left of blue {b:?}");
-    assert!((r.0 as f64 - (38.4 + 81.0)).abs() <= 1.5, "zero at the plot's left: {}", r.0);
+    assert!((r.0 as f64 - (38.4 + gutter)).abs() <= 1.5, "zero at the plot's left: {}", r.0);
 
     // Clustered bars on a reversed axis all start at its right-hand end; an unfilled point leaves
     // its slot empty.
@@ -632,7 +636,7 @@ fn a_reversed_value_axis_grows_bars_leftwards_and_keeps_unfilled_points_empty() 
     assert!(painted_box(&img, GREEN, 0..960).is_none());
     let (r, b) = (painted_box(&img, RED, 0..960).unwrap(), painted_box(&img, BLUE, 0..960).unwrap());
     assert!(r.2.abs_diff(b.2) <= 1, "both bars start at the right-hand end: {r:?} {b:?}");
-    assert!((r.0 as f64 - at(7.0)).abs() <= 1.5 && (b.0 as f64 - at(3.0)).abs() <= 1.5, "{r:?} {b:?}");
+    assert!((r.0 as f64 - at(7.0)).abs() <= 2.0 && (b.0 as f64 - at(3.0)).abs() <= 2.0, "{r:?} {b:?}");
     assert!(r.1 > b.3, "the first category stays at the bottom");
 }
 

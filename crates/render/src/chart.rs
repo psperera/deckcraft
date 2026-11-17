@@ -158,14 +158,44 @@ pub(crate) struct LabelStyle {
 }
 
 pub(crate) fn label(ctx: &mut RenderContext, rctx: &Ctx, m: Affine, text: &str, r: Rect, style: LabelStyle) {
-    let LabelStyle { size, align, anchor, col, bold } = style;
+    draw_label(ctx, rctx, m, label_body(text, &style, false), r);
+}
+
+/// [`label`] broken onto as many lines as `r`'s width needs.
+fn wrapped_label(ctx: &mut RenderContext, rctx: &Ctx, m: Affine, text: &str, r: Rect, style: LabelStyle) {
+    draw_label(ctx, rctx, m, label_body(text, &style, true), r);
+}
+
+/// How wide `text` is on one line at `size` points, measured in the fonts it is drawn with.
+fn label_width(rctx: &Ctx, text: &str, size: f64) -> f64 {
+    let style = LabelStyle { size, align: Align::Left, anchor: Anchor::Top, col: Rgba::BLACK, bold: false };
+    let body = label_body(text, &style, false);
+    let tmp = Shape { text: Some(body.clone()), ..Default::default() };
+    deckcraft_text::fit_width(rctx, &tmp, &body, Rect::new(0.0, 0.0, 1.0, size * 2.0), &deckcraft_text::NoFields)
+}
+
+fn draw_label(ctx: &mut RenderContext, rctx: &Ctx, m: Affine, body: TextBody, r: Rect) {
+    let tmp = Shape { text: Some(body.clone()), ..Default::default() };
+    crate::draw_text(
+        ctx,
+        rctx,
+        &tmp,
+        &body,
+        m,
+        &deckcraft_text::Opts { rect: r, fields: &deckcraft_text::NoFields, prompt_color: None, no_shrink: false },
+    );
+}
+
+/// A chart label's text: no insets, bullets or indent, in `style`, wrapped or on one line.
+fn label_body(text: &str, style: &LabelStyle, wrap: bool) -> TextBody {
+    let &LabelStyle { size, align, anchor, col, bold } = style;
     let mut body = TextBody::from_text(text);
     body.body.inset_l = Some(0.0);
     body.body.inset_r = Some(0.0);
     body.body.inset_t = Some(0.0);
     body.body.inset_b = Some(0.0);
     body.body.anchor = Some(anchor);
-    body.body.wrap = Some(false);
+    body.body.wrap = Some(wrap);
     for p in &mut body.paragraphs {
         p.props.align = Some(align);
         p.props.bullet = Some(Bullet::None);
@@ -177,15 +207,7 @@ pub(crate) fn label(ctx: &mut RenderContext, rctx: &Ctx, m: Affine, text: &str, 
             run.props.fill = Some(Fill::solid(ColorRef::rgb(col)));
         }
     }
-    let tmp = Shape { text: Some(body.clone()), ..Default::default() };
-    crate::draw_text(
-        ctx,
-        rctx,
-        &tmp,
-        &body,
-        m,
-        &deckcraft_text::Opts { rect: r, fields: &deckcraft_text::NoFields, prompt_color: None, no_shrink: false },
-    );
+    body
 }
 
 fn fmt_num(v: f64) -> String {
@@ -409,7 +431,7 @@ fn draw_inner(ctx: &mut RenderContext, rctx: &Ctx, c: &Chart, frame: ChartFrame<
     // A plot the file fixes (`c:manualLayout`, inner) goes exactly there, at its fractions of the
     // chart frame, whatever the title, legend and labels take.
     let manual = c.plot_layout.and_then(PlotLayout::sanitized).map(|l| Rect::new(l.x * w, l.y * h, (l.x + l.w) * w, (l.y + l.h) * h));
-    let cat_room = category_room(c, horiz, base);
+    let cat_room = category_room(rctx, c, horiz, base, area.width());
     // As many major units as the value axis has room for labels (PowerPoint's automatic unit).
     let axis_len = value_axis_len(manual, area, horiz, cat_room);
     let max_intervals = (axis_len / if horiz { base * 6.0 } else { base * 1.9 }).floor().clamp(2.0, 12.0) as usize;
@@ -613,14 +635,30 @@ fn draw_category_axis_line(ctx: &mut RenderContext, m: Affine, plot: Rect, horiz
     ctx.stroke_path(&ax);
 }
 
+/// The most of the chart's area a bar chart's category labels take beside the plot; longer
+/// labels wrap within it. Not measured in PowerPoint.
+const MAX_BAR_LABEL_SHARE: f64 = 0.4;
+
 /// The category labels' room: beside a bar chart's plot, under (or over) a column chart's. A
-/// category axis without labels keeps only a margin, as the value axis does.
-fn category_room(c: &Chart, horiz: bool, base: f64) -> f64 {
+/// category axis without labels keeps only a margin, as the value axis does. A bar chart's room
+/// is its widest label on one line, up to [`MAX_BAR_LABEL_SHARE`] of `width`, so the plot shrinks
+/// to fit the labels rather than the labels running off the chart.
+fn category_room(rctx: &Ctx, c: &Chart, horiz: bool, base: f64, width: f64) -> f64 {
     match (c.cat_hidden, horiz) {
         (true, _) => base * 0.5,
-        (false, true) => base * 4.5,
+        (false, true) => clamp_soft(widest_category(rctx, c, base) + base * 0.4, base * 0.5, width * MAX_BAR_LABEL_SHARE),
         (false, false) => base * 1.8,
     }
+}
+
+/// Category names measured to find the widest: the longest by characters.
+const MEASURED_CATEGORIES: usize = 12;
+
+/// The widest category name on one line at `size` points.
+fn widest_category(rctx: &Ctx, c: &Chart, size: f64) -> f64 {
+    let mut names: Vec<(usize, &str)> = c.categories.iter().map(|n| (n.chars().count(), n.as_str())).collect();
+    names.sort_unstable_by_key(|a| std::cmp::Reverse(a.0));
+    names.iter().take(MEASURED_CATEGORIES).map(|(_, n)| label_width(rctx, n, size)).fold(0.0, f64::max)
 }
 
 /// The value axis' length, to size its automatic major unit: along a fixed plot, or along the
@@ -905,12 +943,15 @@ fn draw_category_labels(ctx: &mut RenderContext, draw: &CategoryLabelDrawing<'_,
     for (i, name) in c.categories.iter().enumerate().filter(|_| xscale.is_none()) {
         let mid = if horiz { plot.y0 + band * (slot(i) + 0.5) } else { plot.x0 + band * (slot(i) + 0.5) };
         if horiz {
+            // A label wider than the room beside the plot wraps there, centred on its bar, rather
+            // than running off the chart.
+            let half = (band / 2.0).max(base);
             let (r, align) = if far {
-                (Rect::new(plot.x1 + base * 0.4, mid - base, area.x1, mid + base), Align::Left)
+                (Rect::new(plot.x1 + base * 0.4, mid - half, area.x1, mid + half), Align::Left)
             } else {
-                (Rect::new(area.x0, mid - base, plot.x0 - base * 0.4, mid + base), Align::Right)
+                (Rect::new(area.x0, mid - half, plot.x0 - base * 0.4, mid + half), Align::Right)
             };
-            label(ctx, rctx, m, name, r, LabelStyle { size: base, align, anchor: Anchor::Middle, col: text_col, bold: false });
+            wrapped_label(ctx, rctx, m, name, r, LabelStyle { size: base, align, anchor: Anchor::Middle, col: text_col, bold: false });
         } else {
             let text = if wraps { split_label(name) } else { name.clone() };
             let (r, anchor) = band_at(mid - band / 2.0, mid + band / 2.0, base * if wraps { 2.8 } else { 1.6 });

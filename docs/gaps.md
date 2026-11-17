@@ -183,6 +183,8 @@ Detail in [file-format-parity.md](file-format-parity.md).
   A manual inner plot layout places the plot and survives rebuilds; outer and `factor`
   layouts, and the legend's and title's own manual layouts, are still laid out automatically.
   Deleted axes and axes without labels are drawn as such and written back on rebuild.
+  A bar chart's category labels size their band and wrap beyond 40 % of the chart; a column
+  chart's still split onto two lines at most.
   The primary axis survives chart rebuilds. A combo chart's secondary value axis is read
   (`y2_*`, `Series.secondary_axis`) but is not written back when the chart is rebuilt.
   An unchanged chart's embedded workbook now survives save (#335); editing the chart still

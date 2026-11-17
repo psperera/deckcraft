@@ -1,7 +1,7 @@
 //! U30: native charts drawn with PowerPoint's plot geometry. A manual inner plot layout puts the
 //! plot exactly where the file says, fixed axis ends are kept exactly, and deleted axes draw
-//! nothing, also after the chart is edited. Each chart is XML written here, imported and
-//! rendered; no Office file is used.
+//! nothing, also after the chart is edited. U31: a bar chart's category labels fit beside its
+//! plot. Each chart is XML written here, imported and rendered; no Office file is used.
 
 use std::io::{Cursor, Read, Write};
 use std::sync::Arc;
@@ -443,4 +443,71 @@ fn a_bar_charts_deleted_value_axis_draws_nothing_and_leaves_no_band() {
     assert_eq!(got.len(), 4, "{got:?}");
     assert!(near(got[0].3, lowest_bottom(457.0)), "{got:?}");
     assert!(!ink(&img, (FRAME.0 as u32 + 1, 458, (FRAME.0 + FRAME.2) as u32 - 1, 479)), "nothing under the plot");
+}
+
+/// `xml` with its categories Q1, Q2… renamed `names`, in order.
+fn named(xml: &str, names: &[&str]) -> String {
+    names.iter().enumerate().fold(xml.to_string(), |x, (i, n)| x.replace(&format!("<c:v>Q{}</c:v>", i + 1), &format!("<c:v>{n}</c:v>")))
+}
+
+/// The automatic layout's area: 4 % of the frame in from each side, (72, 48) to (808, 462).
+const AREA: (f64, f64, f64, f64) = (72.0, 48.0, 808.0, 462.0);
+
+/// The strategy kit's driver-tree bars, on a 0..12 axis that is deleted.
+const BAR_VALUES: [f64; 4] = [2.0, 3.0, 8.0, 12.0];
+const ZERO_TO_12: Axes<'static> = Axes { scaling: r#"<c:max val="12"/><c:min val="0"/>"#, deleted: true, ..SHOWN };
+
+/// Laid out automatically, a bar chart's plot gives its category labels the room they need:
+/// names such as "Derby and Kettering costs" are drawn in full inside the chart instead of being
+/// cut off at its left edge, and short names leave the plot wider.
+#[test]
+fn bar_category_labels_get_the_room_they_need() {
+    let names = ["Factory savings", "Derby and Kettering costs", "B2B sales", "Company-managed shops"];
+    let img = image(&deck(&named(&bar_chart(&BAR_VALUES, "<c:layout/>", ZERO_TO_12), &names)));
+    let got = hbars(&img);
+    assert_eq!(got.len(), 4, "{got:?}");
+    // The bars start at zero, the plot's left edge: right of the widest label (more than 100 pt
+    // at 10 pt) and its 4 pt gap, and well short of the 40 % cap.
+    let left = got[0].0;
+    assert!(got.iter().all(|b| b.0 == left), "{got:?}");
+    assert!(left as f64 > AREA.0 + 100.0 && (left as f64) < AREA.0 + 0.4 * (AREA.2 - AREA.0), "plot from {left}");
+    // The widest label starts at the area's left edge; nothing is drawn left of it.
+    assert!(text(&img, (AREA.0 as u32, 48, AREA.0 as u32 + 10, 462)), "the widest label starts at the area's edge");
+    assert!(!ink(&img, (0, 0, AREA.0 as u32 - 2, 539)), "nothing runs off the chart");
+
+    // Short names take only their own width: the plot reaches further left than the 4.5 em (45 pt)
+    // band every bar chart had before.
+    let short = hbars(&image(&deck(&bar_chart(&BAR_VALUES, "<c:layout/>", ZERO_TO_12))));
+    assert!((short[0].0 as f64) < AREA.0 + 45.0 && short[0].0 < left, "{short:?}");
+}
+
+/// A label wider than 40 % of the chart wraps in a band that wide instead of squeezing the plot
+/// further or running off the chart.
+#[test]
+fn bar_category_labels_past_the_cap_wrap() {
+    let long = "Prices ahead, volume falls as the mix shifts to the cheapest lines in every region";
+    let img = image(&deck(&named(&bar_chart(&BAR_VALUES, "<c:layout/>", ZERO_TO_12), &["Base case", long, "B2B", "Low case"])));
+    let got = hbars(&img);
+    assert_eq!(got.len(), 4, "{got:?}");
+    let cap = AREA.0 + 0.4 * (AREA.2 - AREA.0);
+    assert!(near(got[0].0, cap), "the plot starts at the cap ({cap}): {got:?}");
+    assert!(!ink(&img, (0, 0, AREA.0 as u32 - 2, 539)), "nothing runs off the chart");
+    // The long name (the second category from the bottom) is on more than one 10 pt line around
+    // its bar's centre: one line's ink is about 10 px high, two lines' about 20.
+    let mid = (got[1].1 + got[1].3) / 2;
+    let rows: Vec<u32> = (mid - 40..mid + 40).filter(|y| text(&img, (AREA.0 as u32, *y, cap as u32 - 5, *y))).collect();
+    let (top, bottom) = (rows[0], rows[rows.len() - 1]);
+    assert!(bottom - top > 14, "wrapped onto two lines or more: rows {top}..{bottom}");
+}
+
+/// Beside a manual plot the labels have the room between the chart's edge and the plot; a name
+/// wider than that wraps there rather than running off the chart.
+#[test]
+fn bar_category_labels_beside_a_manual_plot_wrap_within_the_chart() {
+    let names = ["Factory savings", "Derby and Kettering costs", "B2B sales", "Company-managed shops"];
+    let img = image(&deck(&named(&bar_chart(&BAR_VALUES, LAYOUT, ZERO_TO_12), &names)));
+    let got = hbars(&img);
+    assert!(got.iter().all(|b| near(b.0, PLOT.0)), "the bars start at the manual plot's left edge: {got:?}");
+    assert!(text(&img, (FRAME.0 as u32, PLOT.1 as u32, PLOT.0 as u32 - 2, PLOT.3 as u32)), "labels left of the plot");
+    assert!(!ink(&img, (0, 0, FRAME.0 as u32 - 2, 539)), "nothing left of the chart frame");
 }
