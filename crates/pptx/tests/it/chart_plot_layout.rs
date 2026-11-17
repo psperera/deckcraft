@@ -1,7 +1,8 @@
 //! U30: native charts drawn with PowerPoint's plot geometry. A manual inner plot layout puts the
 //! plot exactly where the file says, fixed axis ends are kept exactly, and deleted axes draw
 //! nothing, also after the chart is edited. U31: a bar chart's category labels fit beside its
-//! plot. Each chart is XML written here, imported and rendered; no Office file is used.
+//! plot, and points without a value are gaps rather than zeros. Each chart is XML written here,
+//! imported and rendered; no Office file is used.
 
 use std::io::{Cursor, Read, Write};
 use std::sync::Arc;
@@ -510,4 +511,91 @@ fn bar_category_labels_beside_a_manual_plot_wrap_within_the_chart() {
     assert!(got.iter().all(|b| near(b.0, PLOT.0)), "the bars start at the manual plot's left edge: {got:?}");
     assert!(text(&img, (FRAME.0 as u32, PLOT.1 as u32, PLOT.0 as u32 - 2, PLOT.3 as u32)), "labels left of the plot");
     assert!(!ink(&img, (0, 0, FRAME.0 as u32 - 2, 539)), "nothing left of the chart frame");
+}
+
+/// The strategy kit's null-point check: 57, (none), 200, 0, 288. Its cache has no point 1.
+const WITH_NULL: [f64; 5] = [57.0, 999.0, 200.0, 0.0, 288.0];
+const ZERO_TO_300: Axes<'static> = Axes { scaling: r#"<c:max val="300"/><c:min val="0"/>"#, deleted: true, ..SHOWN };
+
+/// `xml` without its value for category `i`, as python-pptx writes a `None`.
+fn without_point(xml: &str, i: usize, v: f64) -> String {
+    let out = xml.replace(&format!(r#"<c:pt idx="{i}"><c:v>{v}</c:v></c:pt>"#), "");
+    assert_ne!(out, xml, "point {i} removed");
+    out
+}
+
+/// The series' values labelled, `#,##0`, as the kit's charts are.
+fn labelled(xml: &str) -> String {
+    let labels = r##"<c:dLbls><c:numFmt formatCode="#,##0" sourceLinked="0"/><c:showLegendKey val="0"/><c:showVal val="1"/><c:showCatName val="0"/><c:showSerName val="0"/><c:showPercent val="0"/><c:showBubbleSize val="0"/></c:dLbls>"##;
+    xml.replacen(r#"<c:invertIfNegative val="0"/><c:cat>"#, &format!(r#"<c:invertIfNegative val="0"/>{labels}<c:cat>"#), 1)
+}
+
+/// Slot `i` of five across the manual plot: its centre.
+fn slot5(i: usize) -> f64 {
+    PLOT.0 + (PLOT.2 - PLOT.0) / 5.0 * (i as f64 + 0.5)
+}
+
+/// A point missing from the value cache is a gap: no column and no "0" label, while an explicit
+/// zero keeps its label (DeckCraft previews showed the strategy kit's missing year as 0.0).
+#[test]
+fn a_missing_column_value_is_a_gap_and_zero_is_a_point() {
+    let p = deck(&labelled(&without_point(&column_chart(&WITH_NULL, LAYOUT, ZERO_TO_300), 1, 999.0)));
+    let c = chart_of(&p);
+    assert_eq!(c.series[0].values, [Some(57.0), None, Some(200.0), Some(0.0), Some(288.0)]);
+    let img = image(&p);
+    let got = bars(&img);
+    let centres: Vec<u32> = got.iter().map(|b| (b.0 + b.2) / 2).collect();
+    assert_eq!(got.len(), 3, "57, 200 and 288 have columns: {got:?}");
+    for (c, i) in centres.iter().zip([0, 2, 4]) {
+        assert!(near(*c, slot5(i)), "column centres {centres:?}");
+    }
+    let above = |i: usize, top: u32| (slot5(i) as u32 - 25, top, slot5(i) as u32 + 25, PLOT.3 as u32 - 1);
+    assert!(!text(&img, above(1, PLOT.1 as u32)), "no label in the missing year's slot");
+    assert!(text(&img, above(3, 360)), "the explicit zero is labelled");
+    assert!(text(&img, above(0, 300)), "57 is labelled");
+}
+
+/// A line chart of the same values, one 3 pt red line, `c:dispBlanksAs` set to `mode` (or left
+/// out).
+fn line_chart(mode: Option<&str>) -> String {
+    let xml = without_point(&column_chart(&WITH_NULL, LAYOUT, ZERO_TO_300), 1, 999.0)
+        .replace(r#"<c:barChart><c:barDir val="col"/><c:grouping val="clustered"/>"#, r#"<c:lineChart><c:grouping val="standard"/>"#)
+        .replace("</c:barChart>", "</c:lineChart>")
+        .replace(r#"<c:invertIfNegative val="0"/>"#, "")
+        .replace(r#"<c:gapWidth val="60"/>"#, "")
+        .replace(
+            r#"<c:spPr><a:solidFill><a:srgbClr val="FF0000"/></a:solidFill></c:spPr>"#,
+            r#"<c:spPr><a:ln w="38100"><a:solidFill><a:srgbClr val="FF0000"/></a:solidFill></a:ln></c:spPr><c:marker><c:symbol val="none"/></c:marker>"#,
+        );
+    let blanks = mode.map(|m| format!(r#"<c:dispBlanksAs val="{m}"/>"#)).unwrap_or_default();
+    xml.replace(r#"<c:plotVisOnly val="1"/>"#, &format!(r#"<c:plotVisOnly val="1"/>{blanks}"#))
+}
+
+/// Red line ink (antialiased) in the box (inclusive).
+fn red_line(img: &Image, (x0, y0, x1, y1): (u32, u32, u32, u32)) -> bool {
+    (y0..=y1).any(|y| (x0..=x1).any(|x| matches!(rgb(img, x, y), [r, g, b] if r > 200 && g < 90 && b < 90)))
+}
+
+/// A line breaks at a missing point (`gap`, also with no `c:dispBlanksAs`), joins the points
+/// either side (`span`), or dips to zero (`zero`).
+#[test]
+fn a_line_breaks_spans_or_drops_to_zero_at_a_missing_point() {
+    // 5 px to 9 units: 57 at y 338.7, 200 at 210, 0 at 390, 288 at 130.8.
+    let y = |v: f64| PLOT.3 - v / 300.0 * (PLOT.3 - PLOT.1);
+    let at = |x: f64, y: f64| (x as u32 - 2, y as u32 - 6, x as u32 + 2, y as u32 + 6);
+    // Between the first point and the third, where only a line through the missing one goes.
+    let gap = (slot5(0) as u32 + 8, PLOT.1 as u32, slot5(2) as u32 - 8, PLOT.3 as u32 + 2);
+    for mode in [None, Some("gap")] {
+        let p = deck(&line_chart(mode));
+        assert_eq!(chart_of(&p).blanks, deckcraft_model::chart::Blanks::Gap);
+        let img = image(&p);
+        assert!(!red_line(&img, gap), "{mode:?}: the line breaks at the missing point");
+        assert!(red_line(&img, at((slot5(2) + slot5(3)) / 2.0, (y(200.0) + y(0.0)) / 2.0)), "{mode:?}: the rest is drawn");
+    }
+    let img = image(&deck(&line_chart(Some("span"))));
+    assert!(red_line(&img, at(slot5(1), (y(57.0) + y(200.0)) / 2.0)), "span: straight from 57 to 200");
+    assert!(!red_line(&img, at(slot5(1), y(0.0) - 6.0)), "span: not down to zero");
+    let img = image(&deck(&line_chart(Some("zero"))));
+    assert!(red_line(&img, at(slot5(1), y(0.0) - 4.0)), "zero: down to the zero line");
+    assert!(red_line(&img, at((slot5(0) + slot5(1)) / 2.0, (y(57.0) + y(0.0)) / 2.0)), "zero: from 57");
 }

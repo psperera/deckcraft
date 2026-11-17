@@ -314,6 +314,26 @@ impl ErrorBars {
     }
 }
 
+/// How a chart draws a point that has no value (`c:dispBlanksAs`): an empty cell of its data.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Blanks {
+    /// Left out (`gap`): no bar or marker, and a line breaks there. What PowerPoint and
+    /// python-pptx write, and what a chart without `c:dispBlanksAs` gets.
+    #[default]
+    Gap,
+    /// Drawn as zero (`zero`).
+    Zero,
+    /// Left out, a line joining the points either side (`span`).
+    Span,
+}
+
+impl Blanks {
+    pub fn is_gap(&self) -> bool {
+        *self == Blanks::Gap
+    }
+}
+
 /// Where an axis crosses the value axis it is drawn against: `c:crosses` (`autoZero`, `min`,
 /// `max`) or `c:crossesAt`, written on the crossing axis (the category axis, for the value axis).
 /// Bars start at that value, as PowerPoint and Excel draw them.
@@ -430,6 +450,9 @@ pub struct Chart {
     /// (`c:plotArea/c:layout/c:manualLayout`); `None`: laid out automatically.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plot_layout: Option<PlotLayout>,
+    /// How points without a value are drawn (`c:dispBlanksAs`).
+    #[serde(skip_serializing_if = "Blanks::is_gap")]
+    pub blanks: Blanks,
     pub text_color: Option<ColorRef>,
     pub hole_size: f64,
     pub gap_width: f64,
@@ -597,6 +620,7 @@ impl Default for Chart {
             plot_fill: None,
             chart_fill: None,
             plot_layout: None,
+            blanks: Blanks::Gap,
             text_color: None,
             hole_size: 0.5,
             gap_width: 2.19,

@@ -1,7 +1,7 @@
 //! Chart parts: a `c:chartSpace` with cached categories and values.
 //! An unchanged chart also keeps the embedded workbook and the other parts it points at.
 
-use deckcraft_model::chart::{AxisCrosses, Chart, ChartType, ErrorBars, PlotLayout, Series, Trendline, TrendlineType};
+use deckcraft_model::chart::{AxisCrosses, Blanks, Chart, ChartType, ErrorBars, PlotLayout, Series, Trendline, TrendlineType};
 use deckcraft_model::style::Fill;
 
 use crate::opc::{NS_A, NS_C, NS_R};
@@ -849,7 +849,14 @@ pub fn chart_xml(c: &Chart) -> (Vec<u8>, bool) {
         w.close("c:legend");
     }
     w.val("c:plotVisOnly", 1);
-    w.val("c:dispBlanksAs", "gap");
+    w.val(
+        "c:dispBlanksAs",
+        match c.blanks {
+            Blanks::Gap => "gap",
+            Blanks::Zero => "zero",
+            Blanks::Span => "span",
+        },
+    );
     w.close("c:chart");
     if let Some(f) = &c.chart_fill {
         sp_pr(&mut w, Some(f), None);
@@ -1367,6 +1374,25 @@ mod tests {
             let xml = super::chart_xml(&c).0;
             assert!(String::from_utf8_lossy(&xml).contains("<c:plotArea><c:layout/>"), "{kind:?}");
             assert_eq!(crate::read::chart::read_chart_xml(&xml).unwrap().plot_layout, None);
+        }
+    }
+
+    /// How blank points are drawn (`c:dispBlanksAs`) survives a rebuild; a chart without the
+    /// element, or with it bare, reads as `gap`.
+    #[test]
+    fn blank_points_setting_round_trips() {
+        use deckcraft_model::chart::Blanks;
+        for (blanks, val) in [(Blanks::Gap, "gap"), (Blanks::Zero, "zero"), (Blanks::Span, "span")] {
+            let mut c = Chart::sample(ChartType::Line);
+            c.blanks = blanks;
+            let xml = super::chart_xml(&c).0;
+            let text = String::from_utf8_lossy(&xml).into_owned();
+            assert!(text.contains(&format!(r#"<c:plotVisOnly val="1"/><c:dispBlanksAs val="{val}"/></c:chart>"#)), "{text}");
+            assert_eq!(crate::read::chart::read_chart_xml(&xml).unwrap().blanks, blanks);
+            for other in [String::new(), "<c:dispBlanksAs/>".into(), r#"<c:dispBlanksAs val="nonsense"/>"#.into()] {
+                let edited = text.replace(&format!(r#"<c:dispBlanksAs val="{val}"/>"#), &other);
+                assert_eq!(crate::read::chart::read_chart_xml(edited.as_bytes()).unwrap().blanks, Blanks::Gap, "{other}");
+            }
         }
     }
 

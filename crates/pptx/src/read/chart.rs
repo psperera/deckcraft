@@ -1,6 +1,6 @@
 //! Chart parts (`c:chartSpace`) → [`Chart`]. The original XML is kept in `Chart.raw`.
 
-use deckcraft_model::chart::{AxisCrosses, Chart, ChartType, ErrorBars, PlotLayout, Series, Trendline, TrendlineType};
+use deckcraft_model::chart::{AxisCrosses, Blanks, Chart, ChartType, ErrorBars, PlotLayout, Series, Trendline, TrendlineType};
 use deckcraft_model::style::Fill;
 
 use crate::xml::El;
@@ -213,6 +213,13 @@ fn chart_within(root: &El, mut budget: usize) -> Option<Chart> {
     c.chart_fill = simple_fill(root.child("spPr"));
     c.plot_fill = simple_fill(pa.child("spPr"));
     c.plot_layout = pa.child("layout").and_then(|l| l.child("manualLayout")).and_then(plot_layout);
+    // Points without a value. A missing element, or one without a value, is read as `gap`, what
+    // PowerPoint writes and DeckCraft drew so far (the schema's default for the value is `zero`).
+    c.blanks = match ch.child_val("dispBlanksAs") {
+        Some("zero") => Blanks::Zero,
+        Some("span") => Blanks::Span,
+        _ => Blanks::Gap,
+    };
 
     let mut kinds: Vec<ChartType> = vec![];
     // The value axis the first plot group uses is the primary one; a group on another value axis

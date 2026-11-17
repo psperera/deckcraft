@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use deckcraft_color::{ColorTransform, Rgba, SchemeSlot};
 use deckcraft_model::Shape;
-use deckcraft_model::chart::{AxisCrosses, Chart, ChartType, PlotLayout, TrendlineType, axis_scale};
+use deckcraft_model::chart::{AxisCrosses, Blanks, Chart, ChartType, PlotLayout, TrendlineType, axis_scale};
 use deckcraft_model::resolve::Ctx;
 use deckcraft_model::style::{ColorRef, Fill};
 use deckcraft_model::text::{Align, Anchor, Bullet, TextBody};
@@ -1062,10 +1062,24 @@ fn draw_lines(ctx: &mut RenderContext, draw: &mut LineDrawing<'_, '_>) {
         let col = if area_kind { series_fill(rctx, c, si, Some(s)) } else { series_line(rctx, c, si, s) };
         let series_stats = s.error_bars.as_ref().map(|_| deckcraft_model::chart::SeriesStats::of(&s.values));
         let mut pts = vec![];
+        // Where the line breaks: before these points, at points without a value (`gap`). An area
+        // is drawn over them.
+        let mut breaks = vec![];
+        let scatter = matches!(kind, ChartType::Scatter | ChartType::Bubble);
         // Whether the series has any x value, found once rather than per point.
         let any_x = s.x_values.iter().flatten().next().is_some();
         for i in 0..ncat {
-            let Some(v) = s.values.get(i).copied().flatten() else { continue };
+            let (v, blank) = match s.values.get(i).copied().flatten() {
+                Some(v) => (v, false),
+                // Drawn as zero, in its category (a scatter point has no x to put it at).
+                None if c.blanks == Blanks::Zero && !scatter => (0.0, true),
+                None => {
+                    if c.blanks == Blanks::Gap && !area_kind {
+                        breaks.push(pts.len());
+                    }
+                    continue;
+                }
+            };
             let v = if stacked {
                 let base_v = acc.get(i).copied().unwrap_or(0.0);
                 if let Some(a) = acc.get_mut(i) {
@@ -1086,7 +1100,7 @@ fn draw_lines(ctx: &mut RenderContext, draw: &mut LineDrawing<'_, '_>) {
                 }
                 _ => plot.x0 + band * (slot(i) + 0.5),
             };
-            if let Some((lo, hi)) = s.error_bars.as_ref().and_then(|e| series_stats.as_ref().and_then(|st| e.range_in(st, i, v))) {
+            if let Some((lo, hi)) = s.error_bars.as_ref().filter(|_| !blank).and_then(|e| series_stats.as_ref().and_then(|st| e.range_in(st, i, v))) {
                 err_marks.push((x, to_axis(sec, lo), to_axis(sec, hi), base * 0.4, s.error_bars.as_ref().is_some_and(|e| e.end_cap)));
             }
             pts.push(Point::new(x, to_axis(sec, v)));
@@ -1094,7 +1108,7 @@ fn draw_lines(ctx: &mut RenderContext, draw: &mut LineDrawing<'_, '_>) {
         if pts.is_empty() {
             continue;
         }
-        let p = if s.smooth && !area_kind && pts.len() > 2 { smooth_path(&pts) } else { polyline(&pts) };
+        let p = broken_line(&pts, &breaks, s.smooth && !area_kind);
         ctx.set_transform(m);
         if area_kind {
             let zero = draw.zero[usize::from(sec)];
@@ -1119,6 +1133,21 @@ fn draw_lines(ctx: &mut RenderContext, draw: &mut LineDrawing<'_, '_>) {
             }
         }
     }
+}
+
+/// The line through `pts`, broken before each index in `breaks`: each run of points a polyline of
+/// its own, or a smooth curve when `smooth` and the run has more than two points.
+fn broken_line(pts: &[Point], breaks: &[usize], smooth: bool) -> BezPath {
+    let mut out = BezPath::new();
+    let mut start = 0;
+    for &end in breaks.iter().chain(std::iter::once(&pts.len())) {
+        if let Some(run) = pts.get(start..end).filter(|r| !r.is_empty()) {
+            let part = if smooth && run.len() > 2 { smooth_path(run) } else { polyline(run) };
+            out.extend(part.elements().iter().copied());
+        }
+        start = start.max(end);
+    }
+    out
 }
 
 fn draw_bars(ctx: &mut RenderContext, draw: &BarDrawing<'_, '_>) -> Vec<(f64, f64, f64, f64, bool)> {
@@ -1277,6 +1306,31 @@ mod bar_label_tests {
         let zero = Series { values: [Some(0.0)].into(), ..Default::default() };
         assert_eq!(bar_data_label(&chart, &zero, 0).as_deref(), Some("0"));
     }
+
+    /// A pie slice without a value is not labelled "0"; a zero slice is.
+    #[test]
+    fn missing_pie_values_have_no_label_but_explicit_zero_does() {
+        let chart = Chart { data_labels: true, ..Default::default() };
+        let series = Series { values: [Some(3.0), None, Some(0.0), Some(-2.0)].into(), ..Default::default() };
+        let labels: Vec<_> = (0..4).map(|i| super::pie_data_label(&chart, &series, i)).collect();
+        assert_eq!(labels, [Some("3".to_string()), None, Some("0".to_string()), Some("0".to_string())]);
+        let off = Chart { data_labels: false, ..Default::default() };
+        assert_eq!(super::pie_data_label(&off, &series, 0), None);
+    }
+
+    /// A line breaks before each gap; a gap at either end or two in a row leave no empty run.
+    #[test]
+    fn a_line_breaks_at_its_gaps() {
+        use kurbo::{PathEl, Point};
+        let pts: Vec<Point> = (0..5).map(|i| Point::new(i as f64, i as f64)).collect();
+        let moves = |breaks: &[usize]| super::broken_line(&pts, breaks, false).elements().iter().filter(|e| matches!(e, PathEl::MoveTo(_))).count();
+        assert_eq!(moves(&[]), 1);
+        assert_eq!(moves(&[2]), 2);
+        assert_eq!(moves(&[0, 2, 2, 5]), 2);
+        // Smoothing applies to each run of three or more points on its own.
+        let curves = |breaks: &[usize]| super::broken_line(&pts, breaks, true).elements().iter().any(|e| matches!(e, PathEl::CurveTo(..)));
+        assert!(curves(&[2]) && !curves(&[2, 4]));
+    }
 }
 
 fn draw_pie(ctx: &mut RenderContext, rctx: &Ctx, c: &Chart, m: Affine, area: Rect, base: f64, text_col: Rgba) {
@@ -1309,14 +1363,14 @@ fn draw_pie(ctx: &mut RenderContext, rctx: &Ctx, c: &Chart, m: Affine, area: Rec
         ctx.set_paint(color(Rgba::WHITE, 1.0));
         ctx.set_stroke(kurbo::Stroke::new(1.0));
         ctx.stroke_path(&p);
-        if c.series_data_labels(s) {
+        if let Some(text) = pie_data_label(c, s, i) {
             let mid = a0 + sweep / 2.0;
             let lp = Point::new(cen.x + r * 0.65 * mid.cos(), cen.y + r * 0.65 * mid.sin());
             label(
                 ctx,
                 rctx,
                 m,
-                &c.data_label(s, *v),
+                &text,
                 Rect::new(lp.x - 30.0, lp.y - 10.0, lp.x + 30.0, lp.y + 10.0),
                 LabelStyle {
                     size: base,
@@ -1335,6 +1389,15 @@ fn draw_pie(ctx: &mut RenderContext, rctx: &Ctx, c: &Chart, m: Affine, area: Rec
         ctx.set_paint(color(Rgba::WHITE, 1.0));
         ctx.fill_path(&kurbo::Circle::new(cen, r * c.hole_size.clamp(0.1, 0.9)).to_path(0.1));
     }
+}
+
+/// A pie slice's data label, its value as drawn (a negative one as zero). A point without a value
+/// has no slice and no label, rather than a "0".
+fn pie_data_label(c: &Chart, s: &deckcraft_model::chart::Series, i: usize) -> Option<String> {
+    if !c.series_data_labels(s) {
+        return None;
+    }
+    s.values.get(i).copied().flatten().map(|v| c.data_label(s, v.max(0.0)))
 }
 
 /// `v` kept within `lo..=hi` without `f64::clamp`'s panic when `lo > hi` (a chart smaller than
