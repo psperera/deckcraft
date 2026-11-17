@@ -8,7 +8,7 @@ use deckcraft_model::text::{Align, Anchor};
 use kurbo::{Affine, BezPath, Point, Rect, Shape as _};
 use vello_cpu::RenderContext;
 
-use crate::chart::{label, series_fill, series_line};
+use crate::chart::{draw_marker, label, marker_paint, series_fill, series_line};
 use crate::color;
 
 /// The point at `frac` of the radius along spoke `i` of `n` (the first spoke points up).
@@ -118,8 +118,9 @@ pub fn draw(ctx: &mut RenderContext, rctx: &Ctx, c: &Chart, m: Affine, area: Rec
             ctx.set_stroke(kurbo::Stroke::new(lw).with_join(kurbo::Join::Round));
             ctx.stroke_path(&p);
             if s.marker.is_some() {
+                let paint = marker_paint(rctx, s, col);
                 for q in &pts {
-                    ctx.fill_path(&kurbo::Circle::new(*q, 3.5).to_path(0.1));
+                    draw_marker(ctx, *q, &paint);
                 }
             }
         }

@@ -343,7 +343,7 @@ fn series(w: &mut W, c: &Chart, s: &Series, i: usize, kind: ChartType, g: Group)
         w.open0("c:marker");
         w.val("c:symbol", sym);
         if sym != "none" {
-            w.val("c:size", 7);
+            w.val("c:size", s.marker_size.unwrap_or(7));
         }
         w.close("c:marker");
     }
@@ -357,9 +357,18 @@ fn series(w: &mut W, c: &Chart, s: &Series, i: usize, kind: ChartType, g: Group)
             (_, ChartType::Scatter) => None,
             _ => Some("none"),
         };
-        if let Some(sym) = sym.filter(|s| s.chars().all(|c| c.is_ascii_alphanumeric())) {
+        let sym = sym.filter(|s| s.chars().all(|c| c.is_ascii_alphanumeric()));
+        // A marker's own size, fill or outline is written even where the symbol is automatic.
+        let styled = s.marker_size.is_some() || s.marker_fill.is_some() || s.marker_line.is_some();
+        if sym.is_some() || styled {
             w.open0("c:marker");
-            w.val("c:symbol", sym);
+            if let Some(sym) = sym {
+                w.val("c:symbol", sym);
+            }
+            if let Some(n) = s.marker_size {
+                w.val("c:size", n);
+            }
+            sp_pr(w, s.marker_fill.as_ref(), s.marker_line.as_ref());
             w.close("c:marker");
         }
     }
@@ -1489,6 +1498,44 @@ mod tests {
             assert_eq!(back.series[0].point_labels, labels, "{kind:?}");
             assert_eq!(back.point_label(&back.series[0], 0).as_deref(), Some("+24.5 & <more>"));
         }
+    }
+
+    /// U31: a rebuilt chart keeps a series' marker size, fill and outline, also where its
+    /// symbol is automatic.
+    #[test]
+    fn marker_size_fill_and_outline_round_trip() {
+        use deckcraft_model::Line;
+        use deckcraft_model::style::Fill;
+        let orange = Fill::solid(ColorRef::rgb(Rgba::rgb(0xED, 0x7D, 0x31)));
+        let green = Line::solid(ColorRef::rgb(Rgba::rgb(0, 0xB0, 0x50)), 2.0);
+        let cases = [
+            (ChartType::LineMarkers, None),
+            (ChartType::LineMarkers, Some("square")),
+            (ChartType::Scatter, Some("diamond")),
+            (ChartType::Radar, Some("circle")),
+        ];
+        for (kind, symbol) in cases {
+            let mut c = Chart::sample(kind);
+            let s = &mut c.series[0];
+            s.marker = symbol.map(String::from);
+            (s.marker_size, s.marker_fill, s.marker_line) = (Some(12), Some(orange.clone()), Some(green.clone()));
+            let xml = super::chart_xml(&c).0;
+            let text = String::from_utf8_lossy(&xml).into_owned();
+            let back = crate::read::chart::read_chart_xml(&xml).unwrap();
+            let b = &back.series[0];
+            assert_eq!(
+                (b.marker_size, b.marker_fill.as_ref(), b.marker_line.as_ref()),
+                (Some(12), Some(&orange), Some(&green)),
+                "{kind:?} {symbol:?}: {text}"
+            );
+            assert_eq!(b.marker.as_deref(), symbol, "{kind:?}: {text}");
+        }
+        // Without a fill; nothing else written.
+        let mut c = Chart::sample(ChartType::LineMarkers);
+        c.series[0].marker_fill = Some(Fill::None);
+        let back = crate::read::chart::read_chart_xml(&super::chart_xml(&c).0).unwrap();
+        let b = &back.series[0];
+        assert_eq!((b.marker_size, &b.marker_fill, &b.marker_line), (None, &Some(Fill::None), &None));
     }
 
     /// A rebuilt chart keeps a deleted axis deleted, and an axis without labels without them.

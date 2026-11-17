@@ -473,6 +473,17 @@ fn read_error_bars(s: &El, kind: ChartType, budget: &mut usize) -> Option<ErrorB
     })
 }
 
+/// A series' marker size in points (`c:marker/c:size`): the schema's 2 to 72, and 5 for a bare
+/// `<c:size/>`, its default. None when the element is missing or not a whole number.
+fn marker_size(s: &El) -> Option<u8> {
+    let size = s.path(&["marker", "size"])?;
+    let n = match size.attr("val") {
+        None => 5,
+        Some(v) => v.trim().parse::<u8>().ok()?,
+    };
+    Some(n.clamp(2, 72))
+}
+
 /// One `c:ser` of group `g`. `group` is (chart type, on the secondary axis, the group's data-label
 /// setting); the first series with categories sets `categories`.
 fn read_series(s: &El, g: &El, group: (ChartType, bool, Option<bool>), categories: &mut Vec<String>, budget: &mut usize) -> Series {
@@ -483,6 +494,9 @@ fn read_series(s: &El, g: &El, group: (ChartType, bool, Option<bool>), categorie
         line: simple_line(s.child("spPr")),
         smooth: s.child("smooth").and_then(|v| v.bool("val")).unwrap_or(false),
         marker: s.path(&["marker", "symbol"]).and_then(|m| m.attr("val")).filter(|m| *m != "none").map(String::from),
+        marker_size: marker_size(s),
+        marker_fill: simple_fill(s.path(&["marker", "spPr"])),
+        marker_line: simple_line(s.path(&["marker", "spPr"])),
         kind: Some(kind),
         secondary_axis: secondary,
         ..Default::default()
@@ -1245,6 +1259,37 @@ mod tests {
 
     const NS_C: &str = "http://schemas.openxmlformats.org/drawingml/2006/chart";
     const NS_A: &str = "http://schemas.openxmlformats.org/drawingml/2006/main";
+
+    /// U31: a series' marker size, fill and outline (`c:marker`). A bare `<c:size/>` is the
+    /// schema's 5, a size past the schema's 2 to 72 is clamped, and one that isn't a whole number
+    /// from 0 to 255 is left out.
+    #[test]
+    fn marker_size_fill_and_outline_are_read() {
+        use deckcraft_model::style::Fill;
+        let series_of = |marker: &str| {
+            let xml = format!(
+                r#"<c:chartSpace xmlns:c="{NS_C}" xmlns:a="{NS_A}"><c:chart><c:plotArea><c:lineChart><c:grouping val="standard"/><c:ser><c:idx val="0"/><c:order val="0"/>{marker}<c:val><c:numLit><c:ptCount val="1"/><c:pt idx="0"><c:v>1</c:v></c:pt></c:numLit></c:val></c:ser><c:marker val="1"/></c:lineChart></c:plotArea></c:chart></c:chartSpace>"#
+            );
+            read_chart_xml(xml.as_bytes()).unwrap().series.remove(0)
+        };
+        let s = series_of(
+            r#"<c:marker><c:symbol val="circle"/><c:size val="12"/><c:spPr><a:solidFill><a:srgbClr val="ED7D31"/></a:solidFill><a:ln w="25400"><a:solidFill><a:srgbClr val="00B050"/></a:solidFill></a:ln></c:spPr></c:marker>"#,
+        );
+        assert_eq!(s.marker_size, Some(12));
+        assert!(matches!(s.marker_fill, Some(Fill::Solid { .. })), "{:?}", s.marker_fill);
+        let line = s.marker_line.unwrap_or_default();
+        assert_eq!(line.width, Some(2.0));
+        assert!(matches!(line.fill, Some(Fill::Solid { .. })), "{:?}", line.fill);
+        // No fill, no outline, and a bare size.
+        let s = series_of(r#"<c:marker><c:size/><c:spPr><a:noFill/><a:ln><a:noFill/></a:ln></c:spPr></c:marker>"#);
+        assert_eq!((s.marker_size, &s.marker_fill), (Some(5), &Some(Fill::None)));
+        assert_eq!(s.marker_line.and_then(|l| l.fill), Some(Fill::None));
+        for (size, want) in [("1", Some(2)), ("200", Some(72)), ("7.5", None), ("-3", None), ("300", None)] {
+            assert_eq!(series_of(&format!(r#"<c:marker><c:size val="{size}"/></c:marker>"#)).marker_size, want, "{size}");
+        }
+        let s = series_of(r#"<c:marker><c:symbol val="square"/></c:marker>"#);
+        assert_eq!((s.marker_size, s.marker_fill, s.marker_line), (None, None, None));
+    }
 
     /// U31: per-point labels, as python-pptx writes a custom one (`c:tx/c:rich` and `showVal`)
     /// and as PowerPoint writes fields, deleted labels and cell-reference text.

@@ -135,6 +135,62 @@ pub(crate) fn series_line(ctx: &Ctx, c: &Chart, i: usize, s: &deckcraft_model::c
     }
 }
 
+/// A marker's size in points where the file gives none: what DeckCraft drew every marker at
+/// before sizes were read.
+const DEFAULT_MARKER_SIZE: f64 = 7.0;
+/// The width of a marker outline that has no width of its own: PowerPoint's 0.75 pt.
+const MARKER_OUTLINE_WIDTH: f64 = 0.75;
+
+/// How a series' markers are drawn: radius in points, fill, and outline (colour, width).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct MarkerPaint {
+    pub radius: f64,
+    pub fill: Option<Rgba>,
+    pub outline: Option<(Rgba, f64)>,
+}
+
+/// The paint of a solid or patterned fill; none for no fill, `auto` for one a marker can't show.
+fn marker_color(ctx: &Ctx, f: Option<&Fill>, auto: Rgba) -> Option<Rgba> {
+    match f {
+        Some(Fill::None) => None,
+        Some(Fill::Solid { color: cc }) => Some(ctx.color(cc, None)),
+        Some(Fill::Pattern(p)) => Some(ctx.color(&p.fg, None)),
+        _ => Some(auto),
+    }
+}
+
+/// Series `s`'s markers (`c:marker`): its size, else 7 pt; its own fill and outline, else the
+/// series' colour `col`. A marker with a fill but no outline of its own is outlined in `col` at
+/// 0.75 pt; one with neither is a dot of `col`.
+pub(crate) fn marker_paint(ctx: &Ctx, s: &deckcraft_model::chart::Series, col: Rgba) -> MarkerPaint {
+    let radius = s.marker_size.map_or(DEFAULT_MARKER_SIZE, f64::from) / 2.0;
+    let fill = marker_color(ctx, s.marker_fill.as_ref(), col);
+    let outline = match &s.marker_line {
+        None if s.marker_fill.is_none() => None,
+        None => Some((col, MARKER_OUTLINE_WIDTH)),
+        Some(l) => {
+            let w = l.width.filter(|w| w.is_finite() && *w > 0.0).unwrap_or(MARKER_OUTLINE_WIDTH).clamp(0.25, 20.0);
+            marker_color(ctx, l.fill.as_ref(), col).map(|c| (c, w))
+        }
+    };
+    MarkerPaint { radius, fill, outline }
+}
+
+/// A marker centred on `q`, in the space the context's transform maps to the output: the fill,
+/// then the outline centred on its edge.
+pub(crate) fn draw_marker(ctx: &mut RenderContext, q: Point, p: &MarkerPaint) {
+    let circle = kurbo::Circle::new(q, p.radius).to_path(0.1);
+    if let Some(f) = p.fill {
+        ctx.set_paint(color(f, 1.0));
+        ctx.fill_path(&circle);
+    }
+    if let Some((c, w)) = p.outline {
+        ctx.set_paint(color(c, 1.0));
+        ctx.set_stroke(kurbo::Stroke::new(w));
+        ctx.stroke_path(&circle);
+    }
+}
+
 /// A category label on two lines, split at its middle space or dash ("03.11.2025 - 09.11.2025").
 fn split_label(name: &str) -> String {
     let chars: Vec<char> = name.chars().collect();
@@ -1127,9 +1183,9 @@ fn draw_lines(ctx: &mut RenderContext, draw: &mut LineDrawing<'_, '_>) {
             ctx.stroke_path(&p);
         }
         if matches!(kind, ChartType::LineMarkers | ChartType::Scatter | ChartType::Bubble) {
-            ctx.set_paint(color(col, 1.0));
+            let paint = marker_paint(rctx, s, col);
             for q in &pts {
-                ctx.fill_path(&kurbo::Circle::new(*q, 3.5).to_path(0.1));
+                draw_marker(ctx, *q, &paint);
             }
         }
     }
@@ -1737,5 +1793,31 @@ mod tests {
         c.kind = ChartType::Scatter;
         c.series[0].trendlines[0].kind = TrendlineType::Linear;
         assert_eq!(forecast_pad(&c), (0.0, 0.0));
+    }
+
+    /// U31: a marker's size, fill and outline are its own where the file gives them; the
+    /// series' colour fills in the rest.
+    #[test]
+    fn markers_take_their_own_size_fill_and_outline() {
+        use deckcraft_model::Line;
+        use deckcraft_model::chart::Series;
+        let p = deckcraft_model::defaults::new_presentation(None);
+        let ctx = Ctx::for_master(&p, &p.masters[0]);
+        let (col, orange, green) = (Rgba::rgb(0, 0, 255), Rgba::rgb(0xED, 0x7D, 0x31), Rgba::rgb(0, 0xB0, 0x50));
+        let solid = |c: Rgba| Fill::solid(ColorRef::rgb(c));
+        let paint = |s: Series| marker_paint(&ctx, &s, col);
+        // Nothing of its own: a 7 pt dot in the series' colour, as before.
+        assert_eq!(paint(Series::default()), MarkerPaint { radius: 3.5, fill: Some(col), outline: None });
+        assert_eq!(paint(Series { marker_size: Some(12), ..Default::default() }).radius, 6.0);
+        // A fill of its own keeps an outline in the series' colour, PowerPoint's 0.75 pt.
+        let fill_only = Series { marker_fill: Some(solid(orange)), ..Default::default() };
+        assert_eq!(paint(fill_only), MarkerPaint { radius: 3.5, fill: Some(orange), outline: Some((col, 0.75)) });
+        // Its own outline, or none; an outline with only a width is in the series' colour.
+        let ringed = Series { marker_fill: Some(Fill::None), marker_line: Some(Line::solid(ColorRef::rgb(green), 2.0)), ..Default::default() };
+        assert_eq!(paint(ringed), MarkerPaint { radius: 3.5, fill: None, outline: Some((green, 2.0)) });
+        let bare = Series { marker_fill: Some(solid(orange)), marker_line: Some(Line::none()), ..Default::default() };
+        assert_eq!(paint(bare).outline, None);
+        let wide = Series { marker_line: Some(Line { width: Some(3.0), ..Default::default() }), ..Default::default() };
+        assert_eq!(paint(wide).outline, Some((col, 3.0)));
     }
 }

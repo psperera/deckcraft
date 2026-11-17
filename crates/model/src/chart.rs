@@ -232,6 +232,15 @@ pub struct Series {
     pub data_labels: Option<bool>,
     pub smooth: bool,
     pub marker: Option<String>,
+    /// The markers' size in points (`c:marker/c:size`, 2 to 72); none for the default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub marker_size: Option<u8>,
+    /// The markers' own fill (`c:marker/c:spPr`); none for the series' colour.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub marker_fill: Option<Fill>,
+    /// The markers' own outline (`c:marker/c:spPr/a:ln`); none for the series' colour.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub marker_line: Option<Line>,
     /// Combo charts: this series' own type.
     pub kind: Option<ChartType>,
     pub secondary_axis: bool,

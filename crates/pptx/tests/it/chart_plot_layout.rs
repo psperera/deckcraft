@@ -664,3 +664,69 @@ fn a_points_own_label_shows_or_hides_on_its_own() {
     let img = image(&deck(&labels_with(&column_chart(&STEPS, LAYOUT, ZERO_TO_40), true, deleted)));
     assert!(!text(&img, above(0)) && text(&img, above(1)) && text(&img, above(2)), "all but the deleted label");
 }
+
+/// A line with markers (`<c:marker val="1"/>`) through `STEPS` on the fixed 0 to 40 axis: a thin
+/// blue line, its series' marker `marker`.
+fn marker_chart(marker: &str) -> String {
+    column_chart(&STEPS, LAYOUT, ZERO_TO_40)
+        .replace(r#"<c:barChart><c:barDir val="col"/><c:grouping val="clustered"/>"#, r#"<c:lineChart><c:grouping val="standard"/>"#)
+        .replace("</c:barChart>", "</c:lineChart>")
+        .replace(r#"<c:invertIfNegative val="0"/>"#, "")
+        .replace(r#"<c:gapWidth val="60"/>"#, r#"<c:marker val="1"/>"#)
+        .replace(
+            r#"<c:spPr><a:solidFill><a:srgbClr val="FF0000"/></a:solidFill></c:spPr>"#,
+            &format!(r#"<c:spPr><a:ln w="3175"><a:solidFill><a:srgbClr val="0000FF"/></a:solidFill></a:ln></c:spPr>{marker}"#),
+        )
+}
+
+/// Whether a pixel is within 60 of `want` in each channel: drawn in that colour, antialiased
+/// edges with at least about half their cover included.
+fn like(want: [u8; 3]) -> impl Fn([u8; 3]) -> bool {
+    move |got| got.iter().zip(want).all(|(g, w)| g.abs_diff(w) < 60)
+}
+
+/// How many pixels up and down column `x` from row `y` (inclusive) pass `test`: the height of
+/// what is drawn there.
+fn height_at(img: &Image, (x, y): (u32, u32), test: impl Fn([u8; 3]) -> bool) -> u32 {
+    if !test(rgb(img, x, y)) {
+        return 0;
+    }
+    let up = (1..=y).take_while(|d| test(rgb(img, x, y - d))).count();
+    let down = (1..img.height - y).take_while(|d| test(rgb(img, x, y + d))).count();
+    (up + down + 1) as u32
+}
+
+/// U31: line markers take their own size (`c:size`), fill and outline (`c:spPr`); without them
+/// they stay 7 pt dots in the line's colour.
+#[test]
+fn line_markers_take_their_own_size_fill_and_outline() {
+    const ORANGE: [u8; 3] = [0xED, 0x7D, 0x31];
+    const GREEN: [u8; 3] = [0x00, 0xB0, 0x50];
+    const BLUE: [u8; 3] = [0, 0, 255];
+    // The third point, 30 of 40: x = 120 + 160 × 2.5, y = 390 − 30 / 40 × 270 = 187.5. The line
+    // only meets this column there, inside the marker.
+    let at = (520, 187);
+    let marker = |own: &str| image(&deck(&marker_chart(&format!(r#"<c:marker><c:symbol val="circle"/>{own}</c:marker>"#))));
+    let about = |got: u32, want: f64| (f64::from(got) - want).abs() <= 1.5;
+    let orange = r#"<a:solidFill><a:srgbClr val="ED7D31"/></a:solidFill>"#;
+    // Nothing of its own: a 7 pt dot in the line's blue. A size alone changes only the size.
+    let h = height_at(&marker(""), at, like(BLUE));
+    assert!(about(h, 7.0), "the default dot: {h} px");
+    let h = height_at(&marker(r#"<c:size val="14"/>"#), at, like(BLUE));
+    assert!(about(h, 14.0), "size 14: {h} px");
+    // Its own fill without an outline: 14 pt of orange.
+    let h = height_at(&marker(&format!(r#"<c:size val="14"/><c:spPr>{orange}<a:ln><a:noFill/></a:ln></c:spPr>"#)), at, like(ORANGE));
+    assert!(about(h, 14.0), "orange, no outline: {h} px");
+    // A 2 pt green outline centred on the edge: orange inside it, green on it, nothing past it.
+    let ringed = r#"<a:ln w="25400"><a:solidFill><a:srgbClr val="00B050"/></a:solidFill></a:ln>"#;
+    let img = marker(&format!(r#"<c:size val="14"/><c:spPr>{orange}{ringed}</c:spPr>"#));
+    let h = height_at(&img, at, like(ORANGE));
+    assert!(about(h, 12.0), "orange inside the outline: {h} px");
+    for y in [at.1 - 7, at.1 + 7] {
+        assert!(like(GREEN)(rgb(&img, at.0, y)), "the outline at row {y}: {:?}", rgb(&img, at.0, y));
+    }
+    for y in [at.1 - 10, at.1 + 10] {
+        let px = rgb(&img, at.0, y);
+        assert!(!like(GREEN)(px) && !like(ORANGE)(px) && !like(BLUE)(px), "nothing at row {y}: {px:?}");
+    }
+}
