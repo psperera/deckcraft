@@ -730,3 +730,51 @@ fn line_markers_take_their_own_size_fill_and_outline() {
         assert!(!like(GREEN)(px) && !like(ORANGE)(px) && !like(BLUE)(px), "nothing at row {y}: {px:?}");
     }
 }
+
+/// How many pixels left and right along row `y` from column `x` (inclusive) pass `test`: the
+/// width of what is drawn there.
+fn width_at(img: &Image, (x, y): (u32, u32), test: impl Fn([u8; 3]) -> bool) -> u32 {
+    if !test(rgb(img, x, y)) {
+        return 0;
+    }
+    let left = (1..=x).take_while(|d| test(rgb(img, x - d, y))).count();
+    let right = (1..img.width - x).take_while(|d| test(rgb(img, x + d, y))).count();
+    (left + right + 1) as u32
+}
+
+/// U31: each marker symbol (`c:marker/c:symbol`) has its own shape. Across a 14 pt marker 5 pt
+/// above and below its centre: a circle's chord, a square's whole side, a diamond's narrow
+/// corners, a triangle's apex and base. Bars are a fifth as high as wide. An X, a star and a
+/// plus are strokes in the outline's colour.
+#[test]
+fn marker_symbols_have_their_own_shapes() {
+    const ORANGE: [u8; 3] = [0xED, 0x7D, 0x31];
+    const GREEN: [u8; 3] = [0x00, 0xB0, 0x50];
+    // The third point's centre, as in `line_markers_take_their_own_size_fill_and_outline`.
+    let at = (520, 187);
+    let marker = |symbol: &str, sp_pr: &str| {
+        image(&deck(&marker_chart(&format!(r#"<c:marker><c:symbol val="{symbol}"/><c:size val="14"/><c:spPr>{sp_pr}</c:spPr></c:marker>"#))))
+    };
+    let filled = |symbol: &str| marker(symbol, r#"<a:solidFill><a:srgbClr val="ED7D31"/></a:solidFill><a:ln><a:noFill/></a:ln>"#);
+    let about = |got: u32, want: f64| (f64::from(got) - want).abs() <= 1.5;
+    let (above, below) = ((at.0, at.1 - 5), (at.0, at.1 + 5));
+    // (symbol, width 5 pt above the centre, 5 pt below): a circle's chord is 2√(7² − 5²) ≈ 9.8.
+    for (symbol, up, down) in [("circle", 9.8, 9.8), ("square", 14.0, 14.0), ("diamond", 4.0, 4.0), ("triangle", 2.0, 12.0)] {
+        let img = filled(symbol);
+        let (u, d) = (width_at(&img, above, like(ORANGE)), width_at(&img, below, like(ORANGE)));
+        assert!(about(u, up) && about(d, down), "{symbol}: {u} and {d} px wide, want {up} and {down}");
+    }
+    for (symbol, wide) in [("dash", 14.0), ("dot", 7.0)] {
+        let img = filled(symbol);
+        let (w, h) = (width_at(&img, at, like(ORANGE)), height_at(&img, at, like(ORANGE)));
+        assert!(about(w, wide) && about(h, 2.8), "{symbol}: {w} × {h} px, want {wide} × 2.8");
+    }
+    // Green 2 pt strokes, no fill: on a diagonal, up the middle, across the middle.
+    let green = r#"<a:noFill/><a:ln w="25400"><a:solidFill><a:srgbClr val="00B050"/></a:solidFill></a:ln>"#;
+    let places = [(at.0 - 5, at.1 - 5), (at.0, at.1 - 5), (at.0 - 5, at.1)];
+    for (symbol, want) in [("x", [true, false, false]), ("star", [true, true, false]), ("plus", [false, true, true])] {
+        let img = marker(symbol, green);
+        let got = places.map(|(x, y)| like(GREEN)(rgb(&img, x, y)));
+        assert_eq!(got, want, "{symbol}: strokes on the diagonal, up the middle, across the middle");
+    }
+}

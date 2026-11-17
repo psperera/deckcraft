@@ -141,9 +141,52 @@ const DEFAULT_MARKER_SIZE: f64 = 7.0;
 /// The width of a marker outline that has no width of its own: PowerPoint's 0.75 pt.
 const MARKER_OUTLINE_WIDTH: f64 = 0.75;
 
-/// How a series' markers are drawn: radius in points, fill, and outline (colour, width).
+/// A bar marker's half height in marker radii: the bar is a fifth of the marker's size high.
+const MARKER_BAR_HALF_HEIGHT: f64 = 0.2;
+
+/// A marker's shape (`c:marker/c:symbol`), in a square as wide as the marker's size. An
+/// automatic, unknown or picture symbol is drawn as a circle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MarkerSymbol {
+    Circle,
+    Square,
+    /// The square turned 45°, its corners at the middle of each side.
+    Diamond,
+    /// Pointing up: its apex at the top middle, its base the bottom side.
+    Triangle,
+    /// Strokes along both diagonals.
+    X,
+    /// The X with a vertical stroke through it.
+    Star,
+    /// A horizontal and a vertical stroke through the middle.
+    Plus,
+    /// A bar as wide as the marker (Excel's "long bar").
+    Dash,
+    /// A bar half as wide (Excel's "short bar").
+    Dot,
+}
+
+impl MarkerSymbol {
+    /// The shape of a `c:symbol` value.
+    pub(crate) fn of(name: Option<&str>) -> Self {
+        match name {
+            Some("square") => Self::Square,
+            Some("diamond") => Self::Diamond,
+            Some("triangle") => Self::Triangle,
+            Some("x") => Self::X,
+            Some("star") => Self::Star,
+            Some("plus") => Self::Plus,
+            Some("dash") => Self::Dash,
+            Some("dot") => Self::Dot,
+            _ => Self::Circle,
+        }
+    }
+}
+
+/// How a series' markers are drawn: shape, radius in points, fill, and outline (colour, width).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct MarkerPaint {
+    pub symbol: MarkerSymbol,
     pub radius: f64,
     pub fill: Option<Rgba>,
     pub outline: Option<(Rgba, f64)>,
@@ -173,22 +216,73 @@ pub(crate) fn marker_paint(ctx: &Ctx, s: &deckcraft_model::chart::Series, col: R
             marker_color(ctx, l.fill.as_ref(), col).map(|c| (c, w))
         }
     };
-    MarkerPaint { radius, fill, outline }
+    MarkerPaint { symbol: MarkerSymbol::of(s.marker.as_deref()), radius, fill, outline }
+}
+
+/// The closed polygon through `pts`, given in marker radii from the centre `q`.
+fn marker_polygon(q: Point, r: f64, pts: &[(f64, f64)]) -> BezPath {
+    let mut path = BezPath::new();
+    for (i, (x, y)) in pts.iter().enumerate() {
+        let p = (q.x + x * r, q.y + y * r);
+        if i == 0 {
+            path.move_to(p);
+        } else {
+            path.line_to(p);
+        }
+    }
+    path.close_path();
+    path
 }
 
 /// A marker centred on `q`, in the space the context's transform maps to the output: the fill,
-/// then the outline centred on its edge.
+/// then the outline centred on its edge. An X, star or plus has no inside: its strokes are drawn
+/// in the outline's colour and width, else in the fill's colour at 0.75 pt.
 pub(crate) fn draw_marker(ctx: &mut RenderContext, q: Point, p: &MarkerPaint) {
-    let circle = kurbo::Circle::new(q, p.radius).to_path(0.1);
+    let (r, b) = (p.radius, MARKER_BAR_HALF_HEIGHT);
+    let shape = match p.symbol {
+        MarkerSymbol::Circle => kurbo::Circle::new(q, r).to_path(0.1),
+        MarkerSymbol::Square => marker_polygon(q, r, &[(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)]),
+        MarkerSymbol::Diamond => marker_polygon(q, r, &[(0.0, -1.0), (1.0, 0.0), (0.0, 1.0), (-1.0, 0.0)]),
+        MarkerSymbol::Triangle => marker_polygon(q, r, &[(0.0, -1.0), (1.0, 1.0), (-1.0, 1.0)]),
+        MarkerSymbol::Dash => marker_polygon(q, r, &[(-1.0, -b), (1.0, -b), (1.0, b), (-1.0, b)]),
+        MarkerSymbol::Dot => marker_polygon(q, r, &[(-0.5, -b), (0.5, -b), (0.5, b), (-0.5, b)]),
+        MarkerSymbol::X | MarkerSymbol::Star | MarkerSymbol::Plus => {
+            draw_marker_strokes(ctx, q, p);
+            return;
+        }
+    };
     if let Some(f) = p.fill {
         ctx.set_paint(color(f, 1.0));
-        ctx.fill_path(&circle);
+        ctx.fill_path(&shape);
     }
     if let Some((c, w)) = p.outline {
         ctx.set_paint(color(c, 1.0));
         ctx.set_stroke(kurbo::Stroke::new(w));
-        ctx.stroke_path(&circle);
+        ctx.stroke_path(&shape);
     }
+}
+
+/// The strokes of an X, star or plus marker, corner to corner or side to side of its square.
+fn draw_marker_strokes(ctx: &mut RenderContext, q: Point, p: &MarkerPaint) {
+    let Some((c, w)) = p.outline.or(p.fill.map(|f| (f, MARKER_OUTLINE_WIDTH))) else {
+        return;
+    };
+    let diagonals = [((-1.0, -1.0), (1.0, 1.0)), ((-1.0, 1.0), (1.0, -1.0))];
+    let (vertical, horizontal) = (((0.0, -1.0), (0.0, 1.0)), ((-1.0, 0.0), (1.0, 0.0)));
+    let strokes: Vec<((f64, f64), (f64, f64))> = match p.symbol {
+        MarkerSymbol::X => diagonals.to_vec(),
+        MarkerSymbol::Star => vec![diagonals[0], diagonals[1], vertical],
+        MarkerSymbol::Plus => vec![vertical, horizontal],
+        _ => Vec::new(),
+    };
+    let mut path = BezPath::new();
+    for ((x0, y0), (x1, y1)) in strokes {
+        path.move_to((q.x + x0 * p.radius, q.y + y0 * p.radius));
+        path.line_to((q.x + x1 * p.radius, q.y + y1 * p.radius));
+    }
+    ctx.set_paint(color(c, 1.0));
+    ctx.set_stroke(kurbo::Stroke::new(w));
+    ctx.stroke_path(&path);
 }
 
 /// A category label on two lines, split at its middle space or dash ("03.11.2025 - 09.11.2025").
@@ -1807,17 +1901,44 @@ mod tests {
         let solid = |c: Rgba| Fill::solid(ColorRef::rgb(c));
         let paint = |s: Series| marker_paint(&ctx, &s, col);
         // Nothing of its own: a 7 pt dot in the series' colour, as before.
-        assert_eq!(paint(Series::default()), MarkerPaint { radius: 3.5, fill: Some(col), outline: None });
+        assert_eq!(paint(Series::default()), MarkerPaint { symbol: MarkerSymbol::Circle, radius: 3.5, fill: Some(col), outline: None });
         assert_eq!(paint(Series { marker_size: Some(12), ..Default::default() }).radius, 6.0);
         // A fill of its own keeps an outline in the series' colour, PowerPoint's 0.75 pt.
         let fill_only = Series { marker_fill: Some(solid(orange)), ..Default::default() };
-        assert_eq!(paint(fill_only), MarkerPaint { radius: 3.5, fill: Some(orange), outline: Some((col, 0.75)) });
+        assert_eq!(paint(fill_only), MarkerPaint { symbol: MarkerSymbol::Circle, radius: 3.5, fill: Some(orange), outline: Some((col, 0.75)) });
         // Its own outline, or none; an outline with only a width is in the series' colour.
         let ringed = Series { marker_fill: Some(Fill::None), marker_line: Some(Line::solid(ColorRef::rgb(green), 2.0)), ..Default::default() };
-        assert_eq!(paint(ringed), MarkerPaint { radius: 3.5, fill: None, outline: Some((green, 2.0)) });
+        assert_eq!(paint(ringed), MarkerPaint { symbol: MarkerSymbol::Circle, radius: 3.5, fill: None, outline: Some((green, 2.0)) });
         let bare = Series { marker_fill: Some(solid(orange)), marker_line: Some(Line::none()), ..Default::default() };
         assert_eq!(paint(bare).outline, None);
         let wide = Series { marker_line: Some(Line { width: Some(3.0), ..Default::default() }), ..Default::default() };
         assert_eq!(paint(wide).outline, Some((col, 3.0)));
+    }
+
+    /// U31: each `c:symbol` value has its own shape; automatic, picture and unknown ones are
+    /// circles.
+    #[test]
+    fn marker_symbols_have_their_own_shapes() {
+        use MarkerSymbol as M;
+        let named = [
+            ("square", M::Square),
+            ("diamond", M::Diamond),
+            ("triangle", M::Triangle),
+            ("x", M::X),
+            ("star", M::Star),
+            ("plus", M::Plus),
+            ("dash", M::Dash),
+            ("dot", M::Dot),
+            ("circle", M::Circle),
+        ];
+        for (name, want) in named {
+            assert_eq!(M::of(Some(name)), want, "{name}");
+        }
+        for name in [None, Some("auto"), Some("picture"), Some("Square"), Some("")] {
+            assert_eq!(M::of(name), M::Circle, "{name:?}");
+        }
+        let s = deckcraft_model::chart::Series { marker: Some("triangle".into()), ..Default::default() };
+        let p = deckcraft_model::defaults::new_presentation(None);
+        assert_eq!(marker_paint(&Ctx::for_master(&p, &p.masters[0]), &s, Rgba::rgb(0, 0, 0)).symbol, M::Triangle);
     }
 }
