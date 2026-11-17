@@ -46,6 +46,17 @@ const SHOWN: Axes<'static> =
 /// A clustered column chart of one red series, `values` in categories Q1, Q2…, with a gap
 /// width of 60 %, 10 pt text and no title or legend.
 fn column_chart(values: &[f64], layout: &str, ax: Axes<'_>) -> String {
+    clustered("col", values, layout, ax)
+}
+
+/// [`column_chart`] with its bars running across (`c:barDir val="bar"`): the category axis on
+/// the left, first category at the bottom, and the value axis along the bottom.
+fn bar_chart(values: &[f64], layout: &str, ax: Axes<'_>) -> String {
+    clustered("bar", values, layout, ax)
+}
+
+fn clustered(dir: &str, values: &[f64], layout: &str, ax: Axes<'_>) -> String {
+    let (cat_pos, val_pos) = if dir == "bar" { ("l", "b") } else { ("b", "l") };
     let n = values.len();
     let pts: String = values.iter().enumerate().map(|(i, v)| format!(r#"<c:pt idx="{i}"><c:v>{v}</c:v></c:pt>"#)).collect();
     let cats: String = (0..n).map(|i| format!(r#"<c:pt idx="{i}"><c:v>Q{}</c:v></c:pt>"#, i + 1)).collect();
@@ -54,7 +65,7 @@ fn column_chart(values: &[f64], layout: &str, ax: Axes<'_>) -> String {
     let (delete, cat_delete) = (u8::from(ax.deleted), u8::from(ax.cat_deleted));
     let major = ax.major.map(|m| format!(r#"<c:majorUnit val="{m}"/>"#)).unwrap_or_default();
     format!(
-        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><c:chartSpace {NS}><c:chart><c:autoTitleDeleted val="1"/><c:plotArea>{layout}<c:barChart><c:barDir val="col"/><c:grouping val="clustered"/><c:varyColors val="0"/><c:ser><c:idx val="0"/><c:order val="0"/><c:spPr><a:solidFill><a:srgbClr val="FF0000"/></a:solidFill></c:spPr><c:invertIfNegative val="0"/><c:cat><c:strRef><c:strCache><c:ptCount val="{n}"/>{cats}</c:strCache></c:strRef></c:cat><c:val><c:numRef><c:numCache><c:formatCode>General</c:formatCode><c:ptCount val="{n}"/>{pts}</c:numCache></c:numRef></c:val></c:ser><c:gapWidth val="60"/><c:axId val="11"/><c:axId val="12"/></c:barChart><c:catAx><c:axId val="11"/><c:scaling><c:orientation val="minMax"/></c:scaling><c:delete val="{cat_delete}"/><c:axPos val="b"/><c:tickLblPos val="{cat_labels}"/><c:crossAx val="12"/><c:crosses val="autoZero"/></c:catAx><c:valAx><c:axId val="12"/><c:scaling><c:orientation val="{orientation}"/>{scaling}</c:scaling><c:delete val="{delete}"/><c:axPos val="l"/><c:numFmt formatCode="General" sourceLinked="0"/><c:tickLblPos val="{tick_labels}"/><c:crossAx val="11"/><c:crosses val="autoZero"/><c:crossBetween val="between"/>{major}</c:valAx></c:plotArea><c:plotVisOnly val="1"/></c:chart><c:txPr><a:bodyPr/><a:lstStyle/><a:p><a:pPr><a:defRPr sz="1000"/></a:pPr><a:endParaRPr lang="en-US"/></a:p></c:txPr></c:chartSpace>"#
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?><c:chartSpace {NS}><c:chart><c:autoTitleDeleted val="1"/><c:plotArea>{layout}<c:barChart><c:barDir val="{dir}"/><c:grouping val="clustered"/><c:varyColors val="0"/><c:ser><c:idx val="0"/><c:order val="0"/><c:spPr><a:solidFill><a:srgbClr val="FF0000"/></a:solidFill></c:spPr><c:invertIfNegative val="0"/><c:cat><c:strRef><c:strCache><c:ptCount val="{n}"/>{cats}</c:strCache></c:strRef></c:cat><c:val><c:numRef><c:numCache><c:formatCode>General</c:formatCode><c:ptCount val="{n}"/>{pts}</c:numCache></c:numRef></c:val></c:ser><c:gapWidth val="60"/><c:axId val="11"/><c:axId val="12"/></c:barChart><c:catAx><c:axId val="11"/><c:scaling><c:orientation val="minMax"/></c:scaling><c:delete val="{cat_delete}"/><c:axPos val="{cat_pos}"/><c:tickLblPos val="{cat_labels}"/><c:crossAx val="12"/><c:crosses val="autoZero"/></c:catAx><c:valAx><c:axId val="12"/><c:scaling><c:orientation val="{orientation}"/>{scaling}</c:scaling><c:delete val="{delete}"/><c:axPos val="{val_pos}"/><c:numFmt formatCode="General" sourceLinked="0"/><c:tickLblPos val="{tick_labels}"/><c:crossAx val="11"/><c:crosses val="autoZero"/><c:crossBetween val="between"/>{major}</c:valAx></c:plotArea><c:plotVisOnly val="1"/></c:chart><c:txPr><a:bodyPr/><a:lstStyle/><a:p><a:pPr><a:defRPr sz="1000"/></a:pPr><a:endParaRPr lang="en-US"/></a:p></c:txPr></c:chartSpace>"#
     )
 }
 
@@ -348,4 +359,88 @@ fn an_edited_chart_keeps_its_deleted_axes_and_its_layout() {
     }
     let strip = (FRAME.0 as u32, PLOT.1 as u32 - 10, PLOT.0 as u32 - 1, PLOT.3 as u32 + 10);
     assert!(!ink(&img, strip) && !ink(&img, BASELINE) && !text(&img, Q1_BELOW), "still nothing drawn for either axis");
+}
+
+/// The bars of a bar chart: each run of rows with red in it, as (left, top, right, bottom), right
+/// and bottom exclusive, from the bottom of the slide up (the first category's bar first).
+fn hbars(img: &Image) -> Vec<(u32, u32, u32, u32)> {
+    let red_y = |y: u32| (0..img.width).any(|x| rgb(img, x, y) == RED);
+    let mut out = vec![];
+    let mut y = img.height;
+    while y > 0 {
+        if !red_y(y - 1) {
+            y -= 1;
+            continue;
+        }
+        let y1 = y;
+        while y > 0 && red_y(y - 1) {
+            y -= 1;
+        }
+        let mid = (y + y1) / 2;
+        let xs: Vec<u32> = (0..img.width).filter(|x| rgb(img, *x, mid) == RED).collect();
+        out.push((xs[0], y, xs[xs.len() - 1] + 1, y1));
+    }
+    out
+}
+
+/// The kit's bar charts: `va.visible = False` writes a bare `<c:delete/>`, which the schema
+/// reads as true.
+fn bare_delete(xml: &str) -> String {
+    let out = xml.replace(r#"<c:delete val="1"/><c:axPos val="b"/>"#, r#"<c:delete/><c:axPos val="b"/>"#);
+    assert_ne!(out, xml, "the value axis was deleted");
+    out
+}
+
+/// A bar chart on the manual plot: slots of plot height ÷ categories from the bottom up, each bar
+/// the slot ÷ (1 + gap width), running from zero to its value across the fixed −10..44 axis.
+#[test]
+fn a_manual_inner_layout_places_bars_by_powerpoints_arithmetic() {
+    let p = deck(&bare_delete(&bar_chart(&VALUES, LAYOUT, Axes { deleted: true, ..SHOWN })));
+    let c = chart_of(&p);
+    assert_eq!(c.plot_layout, Some(PlotLayout { x: 0.1, y: 0.2, w: 0.8, h: 0.6 }));
+    assert!(c.y_deleted && c.y_hidden && c.kind.horizontal());
+    let img = image(&p);
+    let got = hbars(&img);
+    assert_eq!(got.len(), VALUES.len(), "{got:?}");
+    let (x0, y0, x1, y1) = PLOT;
+    let slot = (y1 - y0) / VALUES.len() as f64;
+    let bar = slot / 1.6;
+    let x_of = |v: f64| x0 + (v - RANGE.0) / (RANGE.1 - RANGE.0) * (x1 - x0);
+    for (i, (&(l, t, r, b), &v)) in got.iter().zip(&VALUES).enumerate() {
+        let mid = y1 - slot * (i as f64 + 0.5);
+        assert!(near(t, mid - bar / 2.0) && near(b, mid + bar / 2.0), "bar {i}: y {t}..{b}, want {}..{}", mid - bar / 2.0, mid + bar / 2.0);
+        let (a, z) = (x_of(0.0), x_of(v));
+        assert!(near(l, a.min(z)) && near(r, a.max(z)), "bar {i} ({v}): x {l}..{r}, want {}..{}", a.min(z), a.max(z));
+    }
+    // The last bar (44, the fixed maximum) reaches the plot's right edge; nothing is drawn under
+    // the plot, where the deleted value axis' labels would go.
+    assert!(near(got[3].2, x1), "{:?}", got[3]);
+    assert!(!ink(&img, (x0 as u32, y1 as u32 + 2, x1 as u32, 470)), "no value axis under the plot");
+}
+
+/// Laid out automatically, a bar chart's deleted value axis draws no labels under the plot (the
+/// strategy kit's deck showed a 0.0–10.0 axis there) and gives its band back to the bars.
+#[test]
+fn a_bar_charts_deleted_value_axis_draws_nothing_and_leaves_no_band() {
+    let fixed = Axes { scaling: r#"<c:max val="44"/><c:min val="0"/>"#, ..SHOWN };
+    let values = [12.0, 30.0, 6.0, 44.0];
+    // The chart's area ends at 96 % of the frame (30 + 432 = 462). The 10 pt value labels take
+    // 1.6 × 10 above that; a hidden axis keeps only a 0.5 × 10 margin. The area starts at 48, and
+    // each of the four slots has a bar 1/1.6 of it, centred.
+    let lowest_bottom = |plot_bottom: f64| {
+        let slot = (plot_bottom - 48.0) / 4.0;
+        plot_bottom - (slot - slot / 1.6) / 2.0
+    };
+    let img = image(&deck(&bar_chart(&values, "<c:layout/>", fixed)));
+    let got = hbars(&img);
+    assert!(near(got[0].3, lowest_bottom(446.0)), "{got:?}");
+    assert!(text(&img, (got[0].0, 447, 830, 462)), "a shown axis has its labels under the plot");
+
+    let p = deck(&bare_delete(&bar_chart(&values, "<c:layout/>", Axes { deleted: true, ..fixed })));
+    assert!(chart_of(&p).y_deleted);
+    let img = image(&p);
+    let got = hbars(&img);
+    assert_eq!(got.len(), 4, "{got:?}");
+    assert!(near(got[0].3, lowest_bottom(457.0)), "{got:?}");
+    assert!(!ink(&img, (FRAME.0 as u32 + 1, 458, (FRAME.0 + FRAME.2) as u32 - 1, 479)), "nothing under the plot");
 }

@@ -284,11 +284,11 @@ fn primary_crossing(c: &Chart, log_base: Option<f64>, (min, max): (f64, f64), to
 /// The plot within `area`, leaving the value labels' gutters (`gutters`: left, and right for a
 /// secondary axis; a bar chart's category labels take the first) and a column chart's category
 /// band, `cat_band` deep: below the plot, or above it when the labels go on the far side (a bar
-/// chart's go right of it).
-fn plot_rect(area: Rect, horiz: bool, far: bool, (gutter, gutter_r): (f64, f64), cat_band: f64, base: f64) -> Rect {
+/// chart's go right of it). A bar chart's value labels take `val_band` under the plot.
+fn plot_rect(area: Rect, horiz: bool, far: bool, (gutter, gutter_r): (f64, f64), cat_band: f64, val_band: f64) -> Rect {
     match (horiz, far) {
-        (true, false) => Rect::new(area.x0 + gutter, area.y0, area.x1, area.y1 - base * 1.6),
-        (true, true) => Rect::new(area.x0, area.y0, area.x1 - gutter, area.y1 - base * 1.6),
+        (true, false) => Rect::new(area.x0 + gutter, area.y0, area.x1, area.y1 - val_band),
+        (true, true) => Rect::new(area.x0, area.y0, area.x1 - gutter, area.y1 - val_band),
         (false, false) => Rect::new(area.x0 + gutter, area.y0, area.x1 - gutter_r, area.y1 - cat_band),
         (false, true) => Rect::new(area.x0 + gutter, area.y0 + cat_band, area.x1 - gutter_r, area.y1),
     }
@@ -441,7 +441,9 @@ fn draw_inner(ctx: &mut RenderContext, rctx: &Ctx, c: &Chart, frame: ChartFrame<
     };
     let gutter_r = second.filter(|_| !c.y2_hidden).map(|sc| clamp_soft(label_w(true, sc), base * 1.5, area.width() * 0.3)).unwrap_or(0.0);
     let (origin, cat_far) = primary_crossing(c, log.map(|(b, _)| b), (min, max), &to_e);
-    let plot = manual.unwrap_or_else(|| plot_rect(area, horiz, cat_far, (gutter, gutter_r), cat_room, base));
+    // Under a bar chart's plot, its value labels' band; a hidden value axis keeps only a margin.
+    let val_band = base * if c.y_hidden { 0.5 } else { 1.6 };
+    let plot = manual.unwrap_or_else(|| plot_rect(area, horiz, cat_far, (gutter, gutter_r), cat_room, val_band));
     // Around a fixed plot the tick labels may use the whole frame.
     let area = if manual.is_some() { Rect::new(0.0, 0.0, w, h).union(plot) } else { area };
     if let Some(f) = &c.plot_fill {
